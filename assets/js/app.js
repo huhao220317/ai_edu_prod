@@ -17,6 +17,12 @@ const ROSTER_KEY    = 'yw_quiz_roster_v1';     // 学生名单：班级 + 学生
 const ASK_KEY       = 'yw_quiz_ask_v1';        // 正在进行 / 最近一次的提问
 const ASK_DRAFT_KEY = 'yw_quiz_ask_draft_v1';  // 提问设置页的选择（课文、题型、人数…）
 
+/* 便携数据文件（U 盘模式）：网站文件夹里放一个 portable-data.js，双击打开就会自动加载 */
+const PORTABLE_FILE   = 'portable-data.js';
+const PORTABLE_FORMAT = 'yw-quiz-portable';
+const PORTABLE_SAVED_KEY  = 'yw_quiz_local_saved_at';   // 本机数据最后一次变动的时间
+const PORTABLE_IGNORE_KEY = 'yw_quiz_portable_ignore';  // 老师选择「保持本机」时记下文件时间，不再打扰
+
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 const ALL_TYPES = ['choice', 'judge', 'fill', 'short'];
 
@@ -238,7 +244,7 @@ function markDemoSeeded() {
 }
 
 function saveBank() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bank)); return true; }
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bank)); markLocalChange(); return true; }
   catch (e) { toast('保存失败：浏览器存储空间不可用', 'bad'); return false; }
 }
 
@@ -914,7 +920,7 @@ function loadRoster() {
 }
 
 function saveRoster() {
-  try { localStorage.setItem(ROSTER_KEY, JSON.stringify(roster)); return true; }
+  try { localStorage.setItem(ROSTER_KEY, JSON.stringify(roster)); markLocalChange(); return true; }
   catch (e) { toast('保存失败：浏览器存储空间不可用', 'bad'); return false; }
 }
 
@@ -1298,6 +1304,157 @@ function addTempStudent(name) {
   saveAssignment();
   toast(inRoster ? '已把「' + nm + '」加进来（名单里的同学）' : '已临时加入「' + nm + '」（不会写入名单）', 'ok');
   rerenderAskRun();
+}
+
+/* ============================== 便携数据文件（U 盘模式） ==============================
+   网页在 file:// 下不能读写磁盘上的任意文件（浏览器安全限制），但可以加载同目录的脚本。
+   所以「便携模式」= 把题库 + 名单 + 成绩导出成一个 portable-data.js 放进网站文件夹，
+   换电脑 / 换 U 盘后双击打开，网页会自动把它读进来。 */
+
+/** 记一笔「本机数据最后变动时间」，用于判断便携文件是否比本机新 */
+function markLocalChange() {
+  try { localStorage.setItem(PORTABLE_SAVED_KEY, String(Date.now())); } catch (e) { /* 忽略 */ }
+}
+function localSavedAt() {
+  try { return parseInt(localStorage.getItem(PORTABLE_SAVED_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+}
+function portableIgnoredAt() {
+  try { return parseInt(localStorage.getItem(PORTABLE_IGNORE_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+}
+
+/** 校验并整理便携文件内容；不是本系统的文件就返回 null */
+function normalizePortable(raw) {
+  if (!raw || typeof raw !== 'object' || raw.format !== PORTABLE_FORMAT) return null;
+  return {
+    savedAt: parseInt(raw.savedAt, 10) || 0,
+    bank: normalizeBank(raw.bank || null),
+    roster: raw.roster ? normalizeRoster(raw.roster) : null,
+    scores: (raw.scores && typeof raw.scores === 'object') ? raw.scores : null
+  };
+}
+
+/** 读网页文件夹里的 portable-data.js（由 index.html 用 <script> 加载） */
+function readPortableFile() {
+  return normalizePortable(window.YW_PORTABLE_DATA);
+}
+
+/** 生成便携文件的内容 */
+function portableFileContent() {
+  const payload = {
+    format: PORTABLE_FORMAT,
+    version: 1,
+    savedAt: Date.now(),
+    note: '语文课堂提问系统 · 便携数据文件。放在网站文件夹里（和 index.html 同一层），打开网站会自动加载。换电脑时直接覆盖同名文件即可。',
+    bank: bank,
+    roster: roster ? { version: 1, activeClassId: roster.activeClassId, classes: roster.classes } : null,
+    scores: loadScores()
+  };
+  return '/* 由「语文课堂提问系统」导出，请勿手改 */\nwindow.YW_PORTABLE_DATA = ' +
+    JSON.stringify(payload, null, 2) + ';\n';
+}
+
+/** 导出便携数据文件（U 盘模式用） */
+function exportPortableData() {
+  if (!bank || !bank.lessons.length) {
+    toast('题库还是空的，先录几道题再导出便携数据', 'bad');
+    return;
+  }
+  downloadTextFile(PORTABLE_FILE, portableFileContent(), 'application/javascript');
+  markLocalChange();
+  toast('已导出 ' + PORTABLE_FILE + '：把它放进网站文件夹（覆盖旧文件），整个文件夹拷到 U 盘即可', 'ok');
+}
+
+/** 把便携数据装进本机：题库、名单、成绩一起替换 */
+function importPortableData(data, opts) {
+  const portable = data || readPortableFile();
+  const options = opts || {};
+  if (!portable) { toast('没有找到可用的便携数据文件', 'bad'); return false; }
+
+  bank = portable.bank;
+  saveRawBank(bank);
+  if (portable.roster) { roster = portable.roster; try { localStorage.setItem(ROSTER_KEY, JSON.stringify(roster)); } catch (e) { /* 忽略 */ } }
+  if (portable.scores) { try { localStorage.setItem(SCORE_KEY, JSON.stringify(portable.scores)); } catch (e) { /* 忽略 */ } }
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* 忽略 */ }   // 会话跟着旧题库，直接清掉
+
+  manageEditing = null;
+  draft = null;
+  session = null;
+  askDraft = loadAskDraft();
+  initAskDraft();
+  markLocalChange();   // 载入后本机就是最新的，之后不再提示
+
+  const lessons = bank.lessons.length;
+  const students = roster ? roster.classes.reduce((n, c) => n + c.students.length, 0) : 0;
+  if (!options.silent) toast('已载入便携数据：' + lessons + ' 篇课文、' + students + ' 名学生', 'ok');
+  if (!options.noRender) dispatchView();
+  return true;
+}
+
+/** 供界面按钮调用：立即载入 U 盘里的便携数据 */
+function importPortableNow() {
+  const portable = readPortableFile();
+  if (!portable) { toast('网站文件夹里没有 portable-data.js', 'bad'); return false; }
+  return importPortableData(portable, {});
+}
+
+function hidePortableTip() {
+  const el = $('#portableTip');
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+/** 本机数据与便携文件都非空、且文件更新时，顶部给一条提示让老师选择 */
+function showPortableTip(portable) {
+  if ($('#portableTip')) return;
+  const el = document.createElement('div');
+  el.id = 'portableTip';
+  el.className = 'portable-tip';
+  el.setAttribute('role', 'status');
+  el.innerHTML = '<strong>U 盘里的数据比本机新</strong>' +
+    '<span>便携数据文件是 ' + esc(shortDate(portable.savedAt)) + ' 导出的，本机数据是 ' +
+      esc(shortDate(localSavedAt())) + '。要载入吗？</span>' +
+    '<button class="btn btn-primary btn-sm" id="portableTipLoad" type="button">载入 U 盘数据</button>' +
+    '<button class="btn btn-ghost btn-sm" id="portableTipKeep" type="button">保持本机</button>';
+  const header = document.querySelector('.site-header');
+  if (header && header.parentNode) header.parentNode.insertBefore(el, header.nextSibling);
+  else document.body.insertBefore(el, document.body.firstChild);
+
+  const load = $('#portableTipLoad');
+  if (load) load.addEventListener('click', () => { hidePortableTip(); importPortableNow(); });
+  const keep = $('#portableTipKeep');
+  if (keep) keep.addEventListener('click', () => {
+    try { localStorage.setItem(PORTABLE_IGNORE_KEY, String(portable.savedAt)); } catch (e) { /* 忽略 */ }
+    hidePortableTip();
+    toast('好的，继续用本机数据（再导出一次便携文件就能覆盖它）');
+  });
+}
+
+/**
+ * 启动时的自动判断：
+ * · 这台电脑第一次打开（localStorage 里还没有题库，刚播完内置示例）→ 直接载入便携数据
+ * · 本机有数据、便携文件更新 → 只提示，不擅自覆盖
+ * @param {boolean} firstVisit 由 boot() 在 loadBank() 之前判断出来
+ */
+function applyPortableOnBoot(firstVisit) {
+  const portable = readPortableFile();
+  if (!portable) return null;
+  if (firstVisit) {
+    importPortableData(portable, { noRender: true });
+    return portable;
+  }
+  if (portable.savedAt > localSavedAt() && portable.savedAt > portableIgnoredAt()) showPortableTip(portable);
+  return portable;
+}
+
+/** 这台电脑以前有没有存过题库（要在 loadBank() 播种内置示例之前判断） */
+function hasSavedBank() {
+  try { return !!localStorage.getItem(STORAGE_KEY); } catch (e) { return false; }
+}
+
+/** 题库管理页上显示的便携数据状态 */
+function portableStatusText() {
+  const portable = readPortableFile();
+  if (!portable) return '未找到 portable-data.js（导出的文件放进网站文件夹即可生效）';
+  return '已找到（' + shortDate(portable.savedAt) + ' 导出的数据，共 ' + portable.bank.lessons.length + ' 篇课文）';
 }
 
 /* ============================== 路由 ============================== */
@@ -2248,10 +2405,13 @@ function viewManage() {
             '<button class="btn btn-primary btn-sm" id="btnExportXlsx">' + icon('download') + '导出 Excel 题库</button>' +
             '<button class="btn btn-ghost btn-sm" id="btnNewLesson">＋ 新建课文</button>' +
             '<button class="btn btn-ghost btn-sm" id="btnExport">' + icon('download') + '导出 JSON 备份</button>' +
+            '<button class="btn btn-ghost btn-sm" id="btnExportPortable">' + icon('download') + '导出便携数据（U 盘用）</button>' +
             '<button class="btn btn-ghost btn-sm" id="btnRestoreDemo">恢复示例题库</button>' +
             '<button class="btn btn-danger btn-sm" id="btnWipe">' + icon('trash') + '清空全部</button>' +
           '</div>' +
           '<p class="muted" style="margin-top:14px;font-size:13px">「导出 Excel 题库」得到的 .xlsx 就是你的题库存档：在 Excel 里改完再上传回来，两边内容保持一致。JSON 备份适合换电脑时整库搬运。</p>' +
+          '<p class="tip-line">便携数据文件：' + esc(portableStatusText()) + '<br>' +
+            '「导出便携数据」会下载 <b>' + PORTABLE_FILE + '</b>：把它放进网站文件夹（覆盖旧文件），整个文件夹拷到 U 盘，换电脑打开就能直接用，题库 / 名单 / 成绩都会跟过去。</p>' +
         '</section>' +
       '</div>' +
     '</div>' +
@@ -3399,6 +3559,10 @@ function bindManage() {
     toast('已导出 JSON 备份', 'ok');
   });
 
+  // 导出便携数据（U 盘模式）
+  const expPortable = $('#btnExportPortable');
+  if (expPortable) expPortable.addEventListener('click', exportPortableData);
+
   // 恢复示例
   const rs = $('#btnRestoreDemo');
   if (rs) rs.addEventListener('click', () => {
@@ -3581,11 +3745,29 @@ function showStorageWarning() {
   else document.body.insertBefore(el, document.body.firstChild);
 }
 
+/** 渲染 + 绑定当前路由（首屏、hashchange、载入便携数据后共用） */
+function dispatchView() {
+  if (parseRoute().name !== 'quiz') document.onkeydown = null;
+  render();
+  const r = parseRoute();
+  if (r.name === 'home') bindHome();
+  else if (r.name === 'quiz') bindQuiz();
+  else if (r.name === 'manage') bindManage();
+  else if (r.name === 'result') bindResult();
+  else if (r.name === 'roster') bindRoster();
+  else if (r.name === 'ask') bindAsk();
+  else if (r.name === 'askRun') bindAskRun();
+}
+
 function boot() {
+  const firstVisit = !hasSavedBank();   // 必须在 loadBank() 之前判断
   bank = loadBank();
   roster = loadRoster();
   askDraft = loadAskDraft();
   assignment = loadAssignment();
+
+  // 网站文件夹里有便携数据？本机是空的就直接用，比本机新就提示
+  applyPortableOnBoot(firstVisit);
   initAskDraft();
 
   // 存储不可用 → 顶部醒目提示
@@ -3613,22 +3795,8 @@ function boot() {
     if (parseRoute().name === 'manage') { render(true); bindManage(); }
   }));
 
-  // 渲染 + 绑定当前路由（hashchange 与首屏共用）
-  const dispatch = () => {
-    if (parseRoute().name !== 'quiz') document.onkeydown = null;
-    render();
-    const r = parseRoute();
-    if (r.name === 'home') bindHome();
-    else if (r.name === 'quiz') bindQuiz();
-    else if (r.name === 'manage') bindManage();
-    else if (r.name === 'result') bindResult();
-    else if (r.name === 'roster') bindRoster();
-    else if (r.name === 'ask') bindAsk();
-    else if (r.name === 'askRun') bindAskRun();
-  };
-
-  window.addEventListener('hashchange', dispatch);
-  dispatch();
+  window.addEventListener('hashchange', dispatchView);
+  dispatchView();
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

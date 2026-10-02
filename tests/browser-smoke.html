@@ -152,6 +152,25 @@ frame.onload = async () => {
     await wait(250);
     ok(D.querySelectorAll('.student-row').length === 8, '批量粘贴名单后共 8 人');
 
+    // ---- 便携数据（U 盘模式）----
+    W.location.hash = '#/manage';
+    await wait(300);
+    ok(!!D.querySelector('#btnExportPortable'), '题库管理页有「导出便携数据（U 盘用）」按钮');
+    ok(/便携数据文件/.test(D.querySelector('#main').textContent), '页面上显示便携数据文件状态');
+
+    W.YW_PORTABLE_DATA = {
+      format: 'yw-quiz-portable', savedAt: Date.now(),
+      bank: { lessons: [{ title: 'U盘课文', questions: [{ id: 'p1', type: 'judge', stem: '便携数据里的题', answer: '正确' }] }] },
+      roster: { classes: [{ id: 'c9', name: 'U盘班', students: [{ id: 't1', name: 'U盘同学' }] }] },
+      scores: {}
+    };
+    W.importPortableNow();
+    await wait(300);
+    const bankNow = JSON.parse(localStorage.getItem('yw_quiz_bank_v1'));
+    ok(bankNow.lessons.length === 1 && bankNow.lessons[0].title === 'U盘课文', '载入便携数据后题库被整体替换');
+    const rosterNow = JSON.parse(localStorage.getItem('yw_quiz_roster_v1'));
+    ok(rosterNow.classes[0].name === 'U盘班' && rosterNow.classes[0].students.length === 1, '名单跟着便携数据一起替换');
+
     // ---- 首页入口 ----
     W.location.hash = '#/';
     await wait(300);

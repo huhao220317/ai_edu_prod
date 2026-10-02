@@ -139,6 +139,7 @@ test('四种题型的判分', function () {
 console.log('\n学生名单');
 const normalizeRoster = api('normalizeRoster');
 const randomPickStudents = api('randomPickStudents');
+const normalizePortable = api('normalizePortable');
 
 test('normalizeRoster 兼容字符串名单与脏数据', function () {
   const r = normalizeRoster({ classes: [
@@ -157,6 +158,65 @@ test('normalizeRoster 空数据时给一个默认班级', function () {
   eq(r.classes.length, 1);
   eq(r.classes[0].name, '我的班级');
   eq(r.classes[0].students.length, 0);
+});
+
+test('便携数据文件：认识自家格式，题库/名单/成绩都带进来', function () {
+  const p = normalizePortable({
+    format: 'yw-quiz-portable',
+    savedAt: 1759470000000,
+    bank: { lessons: [{ title: '观潮', questions: [{ id: 'p1', type: 'judge', stem: '潮来前江面平静。', answer: '正确' }] }] },
+    roster: { classes: [{ id: 'c9', name: 'U盘班', students: ['张三'] }] },
+    scores: { l1: { rate: 80 } }
+  });
+  ok(!!p, '应该识别为便携数据');
+  eq(p.savedAt, 1759470000000);
+  eq(p.bank.lessons.length, 1);
+  eq(p.bank.lessons[0].questions[0].answer, '正确');
+  eq(p.roster.classes[0].name, 'U盘班');
+  eq(p.roster.classes[0].students.length, 1);
+  eq(p.scores.l1.rate, 80);
+});
+
+test('便携数据文件：别的文件一律不认', function () {
+  eq(normalizePortable(null), null);
+  eq(normalizePortable('yw-quiz-portable'), null);
+  eq(normalizePortable({ version: 1, lessons: [] }), null, '缺少 format 的 JSON 备份不能被当成便携数据');
+  eq(normalizePortable({ format: 'something-else' }), null);
+});
+
+test('便携数据文件：缺 savedAt / 空题库也能读，不会崩', function () {
+  const p = normalizePortable({ format: 'yw-quiz-portable' });
+  ok(!!p);
+  eq(p.savedAt, 0);
+  eq(p.bank.lessons.length, 0);
+  eq(p.roster, null);
+  eq(p.scores, null);
+});
+
+test('第一次在这台电脑打开时，便携数据会自动载入', function () {
+  vm.runInContext('window.YW_PORTABLE_DATA = ' + JSON.stringify({
+    format: 'yw-quiz-portable',
+    savedAt: 1759470000000,
+    bank: { lessons: [{ title: 'U盘带来的课文', questions: [{ id: 'u1', type: 'judge', stem: '便携数据里的题', answer: '正确' }] }] },
+    roster: { classes: [{ id: 'uc', name: 'U盘班', students: ['U盘同学'] }] },
+    scores: {}
+  }) + ';', ctx);
+  // 模拟 loadBank() 刚播完内置示例的状态
+  vm.runInContext('bank = { version: 1, lessons: [{ id: "demo", title: "内置示例", questions: [{ id: "d1", type: "judge", stem: "内置题", answer: "正确" }] }] }; roster = normalizeRoster(null);', ctx);
+
+  const applied = vm.runInContext('applyPortableOnBoot(true)', ctx);
+  ok(!!applied, '应识别到便携数据文件');
+  eq(vm.runInContext('bank.lessons[0].title', ctx), 'U盘带来的课文', '内存里的题库被替换');
+  eq(vm.runInContext('JSON.parse(localStorage.getItem("yw_quiz_bank_v1")).lessons[0].title', ctx), 'U盘带来的课文', '题库已写进本机存储');
+  eq(vm.runInContext('JSON.parse(localStorage.getItem("yw_quiz_roster_v1")).classes[0].name', ctx), 'U盘班', '名单一起写进本机存储');
+});
+
+test('本机已有数据时不自动覆盖，只在便携文件更新时提示', function () {
+  vm.runInContext('localStorage.setItem("yw_quiz_local_saved_at", "2000000000000")', ctx);
+  let applied = vm.runInContext('applyPortableOnBoot(false)', ctx);
+  ok(!!applied);
+  eq(vm.runInContext('bank.lessons[0].title', ctx), 'U盘带来的课文', '本机数据没有被改动');
+  ok(vm.runInContext('typeof showPortableTip === "function"', ctx), '有提示函数（由 boot 之外的界面调用）');
 });
 
 test('开启公平优先时，先照顾「还没被问过」的同学', function () {
