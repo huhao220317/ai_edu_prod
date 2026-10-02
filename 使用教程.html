@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>使用教程 · 语文课堂提问系统</title>
+<style>
+  :root {
+    --primary: #3b5bdb; --primary-dark: #2f49b0; --primary-soft: #eef2ff;
+    --accent: #e8940f; --accent-soft: #fff7e6;
+    --success: #2f9e44; --success-soft: #ebfbee;
+    --danger: #e03131; --danger-soft: #fff5f5;
+    --text: #1f2937; --muted: #6b7280; --border: #e3e8f0;
+    --surface: #fff; --bg: #f4f6fb;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15.5px/1.75 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  .layout { display: flex; max-width: 1180px; margin: 0 auto; gap: 34px; padding: 28px 20px 80px; }
+  nav.toc {
+    flex: 0 0 232px; position: sticky; top: 24px; align-self: flex-start;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 8px 14px 0; max-height: calc(100vh - 48px); overflow: auto;
+  }
+  nav.toc h4 { margin: 0 18px 8px; font-size: 13px; color: var(--muted); letter-spacing: .12em; }
+  nav.toc a {
+    display: block; padding: 6px 18px; color: var(--text); text-decoration: none;
+    font-size: 14px; border-left: 3px solid transparent;
+  }
+  nav.toc a:hover { background: var(--primary-soft); color: var(--primary-dark); }
+  nav.toc a.sub { padding-left: 34px; font-size: 13.5px; color: var(--muted); }
+  main { flex: 1; min-width: 0; }
+
+  /* 封面 */
+  .hero {
+    background: linear-gradient(135deg, #3b5bdb, #5470e8);
+    border-radius: 18px; color: #fff; padding: 44px 40px 38px; margin-bottom: 30px;
+  }
+  .hero h1 { margin: 0 0 10px; font-size: 30px; letter-spacing: .01em; }
+  .hero p { margin: 0 0 22px; opacity: .92; font-size: 16px; }
+  .hero .btn {
+    display: inline-block; background: #fff; color: var(--primary-dark);
+    font-weight: 700; font-size: 16px; padding: 13px 30px; border-radius: 999px;
+    text-decoration: none; box-shadow: 0 6px 18px rgba(0,0,0,.18);
+  }
+  .hero .btn:hover { transform: translateY(-1px); }
+  .hero .meta { margin-top: 20px; font-size: 13px; opacity: .8; }
+
+  section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 30px 34px; margin-bottom: 26px;
+  }
+  h2 { margin: 0 0 6px; font-size: 22px; display: flex; align-items: center; gap: 10px; }
+  h2 .no {
+    flex: none; width: 30px; height: 30px; border-radius: 9px; background: var(--primary);
+    color: #fff; font-size: 15px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  h3 { margin: 26px 0 8px; font-size: 17px; }
+  p { margin: 8px 0; }
+  .lead { color: var(--muted); margin-bottom: 14px; }
+
+  .shot {
+    display: block; width: 100%; border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(17,24,39,.08); margin: 14px 0 6px;
+  }
+  .cap { text-align: center; color: var(--muted); font-size: 13px; margin: 4px 0 8px; }
+
+  ol.steps { padding-left: 0; list-style: none; counter-reset: s; margin: 14px 0; }
+  ol.steps li {
+    counter-increment: s; position: relative; padding: 2px 0 12px 44px;
+  }
+  ol.steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 3px;
+    width: 26px; height: 26px; border-radius: 50%; background: var(--primary-soft);
+    color: var(--primary-dark); font-weight: 700; font-size: 13.5px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  ol.steps li b.t { display: block; margin-bottom: 2px; }
+
+  .tip, .warn, .danger {
+    border-radius: 10px; padding: 12px 16px; margin: 14px 0; font-size: 14.5px;
+  }
+  .tip   { background: var(--success-soft); border: 1px solid #bfe3c6; }
+  .warn  { background: var(--accent-soft);  border: 1px solid #f0cf92; }
+  .danger{ background: var(--danger-soft);  border: 1px solid #f3c1c1; }
+  .tip b:first-child, .warn b:first-child, .danger b:first-child { display: inline-block; margin-right: 6px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--primary-soft); color: var(--primary-dark); white-space: nowrap; }
+  tr:nth-child(even) td { background: #fafbfe; }
+  code {
+    background: #eef1f7; border-radius: 5px; padding: 1.5px 7px;
+    font: 600 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #334;
+  }
+  kbd {
+    background: #fff; border: 1px solid #c9d2e0; border-bottom-width: 2.5px; border-radius: 6px;
+    padding: 1px 8px; font: 600 12.5px ui-monospace, Menlo, monospace; color: #334;
+  }
+  pre.sample {
+    background: #f8fafc; border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font: 12.8px/1.7 ui-monospace, Menlo, Consolas, monospace;
+    color: #334; margin: 10px 0;
+  }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 14px 0; }
+  .card {
+    border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: #fbfcfe;
+  }
+  .card h4 { margin: 0 0 6px; font-size: 15px; color: var(--primary-dark); }
+  .card p { margin: 0; font-size: 14px; color: #475569; }
+  details {
+    border: 1px solid var(--border); border-radius: 10px; padding: 0 16px; margin: 10px 0;
+    background: #fbfcfe;
+  }
+  details summary { cursor: pointer; font-weight: 600; padding: 12px 0; }
+  details[open] summary { border-bottom: 1px dashed var(--border); margin-bottom: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    nav.toc { position: static; flex: none; max-height: none; }
+    .grid2 { grid-template-columns: 1fr; }
+    section { padding: 22px 20px; }
+    .hero { padding: 32px 24px; }
+  }
+  @media print {
+    body { background: #fff; }
+    nav.toc { display: none; }
+    section { border: none; padding: 10px 0; page-break-inside: avoid; }
+    .hero .btn { display: none; }
+    .shot { box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc" aria-label="目录">
+  <h4>目 录</h4>
+  <a href="#s1">1 · 快速开始</a>
+  <a href="#s2">2 · 认识界面</a>
+  <a href="#s3">3 · 建立自己的题库</a>
+  <a class="sub" href="#s3-1">3.1 用 Excel 管理题目（推荐）</a>
+  <a class="sub" href="#s3-2">3.2 粘贴文本快速录题</a>
+  <a class="sub" href="#s3-3">3.3 在网页里手动录入</a>
+  <a href="#s4">4 · 课堂提问怎么用</a>
+  <a href="#s5">5 · 成绩与错题</a>
+  <a href="#s6">6 · 备份与换电脑</a>
+  <a href="#s7">7 · 常见问题</a>
+</nav>
+
+<main>
+
+<div class="hero">
+  <h1>语文课堂提问系统 · 使用教程</h1>
+  <p>按课文组织题库，课堂上逐题提问、即时判分、错题一目了然。<br>不需要安装任何软件，也不需要联网。</p>
+  <a class="btn" href="index.html">▶ 打开网站</a>
+  <p class="meta">本教程随网站附带，可离线阅读，也可直接打印（Ctrl/⌘ + P）。</p>
+</div>
+
+<!-- ============================================================ 1 -->
+<section id="s1">
+  <h2><span class="no">1</span>快速开始</h2>
+  <p class="lead">三步上手：解压 → 双击 → 开始上课。</p>
+
+  <ol class="steps">
+    <li><b class="t">解压缩</b>
+      把收到的压缩包解压到任意位置（如桌面）。解压后得到一个文件夹，<b>里面的文件和文件夹请保持在同一层，不要单独挪动</b>。</li>
+    <li><b class="t">双击 <code>index.html</code></b>
+      用浏览器打开它，网站立刻可以使用——已内置《观潮》《走月亮》两篇示例课文共 12 道题，可直接体验。</li>
+    <li><b class="t">换成自己的题库</b>
+      打开页面右上角「题库管理」，上传你按第 3 节格式准备好的 Excel 表格即可。</li>
+  </ol>
+
+  <div class="tip"><b>✔ 推荐浏览器</b>Chrome 或 Edge（电脑上都免费）。Safari 也能用，但双击打开时部分版本会禁止保存数据（见第 7 节问题 2）。</div>
+
+  <h3>三种打开方式（按方便程度排序）</h3>
+  <div class="cols">
+    <div class="card"><h4>方式一：双击打开（最常用）</h4><p>直接双击 <code>index.html</code>。日常备课、上课足够了。</p></div>
+    <div class="card"><h4>方式二：拖进浏览器</h4><p>把 <code>index.html</code> 拖到已打开的浏览器窗口里，效果一样。</p></div>
+    <div class="card"><h4>方式三：本地小服务（进阶）</h4><p>想在教室多台电脑共用同一份题库、或需要部署到校园网时使用，见随包 <code>README.md</code> 的部署章节。</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section id="s2">
+  <h2><span class="no">2</span>认识界面</h2>
+  <p class="lead">整个网站只有两个主页面：<b>课文页</b>（上课用）和<b>题库管理页</b>（备课时用）。</p>
+
+  <img class="shot" src="assets/tutorial/01-首页.jpg" alt="首页：课文列表">
+  <p class="cap">课文页：每篇课文一张卡片，显示题量与题型分布，点「开始答题」进入课堂提问。</p>
+</section>
+
+<!-- ============================================================ 3 -->
+<section id="s3">
+  <h2><span class="no">3</span>建立自己的题库</h2>
+  <p class="lead">进入「题库管理」页，有三种录题方式，可以混用。</p>
+  <img class="shot" src="assets/tutorial/04-题库管理.jpg" alt="题库管理页">
+  <p class="cap">题库管理页：上方是导入区（拖拽 / 粘贴 / 模板），下方是已导入的课文列表。</p>
+
+  <h3 id="s3-1">3.1 用 Excel 管理题目（推荐）</h3>
+  <p>这是<b>最主要的方式</b>：在 Excel 里维护题目 → 存盘 → 拖进网页，页面立即生效。</p>
+
+  <ol class="steps">
+    <li><b class="t">下载模板</b>在「题库管理 → 上传题目」里点「下载 Excel 模板」，得到一个含「填写说明」工作表的 xlsx。</li>
+    <li><b class="t">按格式填题</b>一行一道题，照下表的列填写（也可以先看包内 <code>sample/示例题库-四年级上册.xlsx</code> 照葫芦画瓢）。</li>
+    <li><b class="t">上传生效</b>把填好的 xlsx 拖进网页的虚线框里。同名课文会提示「覆盖」还是「追加」；<b>上传即生效，不用刷新</b>。</li>
+  </ol>
+
+  <table>
+    <tr><th style="width:88px">列</th><th>怎么填</th></tr>
+    <tr><td><b>课文</b></td><td>课文名称，<b>同名课文会归到同一篇</b>。这是分组的唯一依据。</td></tr>
+    <tr><td>年级 / 作者</td><td>选填，显示在卡片上（如「四年级上册 · 周密」）。</td></tr>
+    <tr><td>题型</td><td>选择题 / 判断题 / 填空题 / 简答题。<b>留空会按内容自动判断</b>。</td></tr>
+    <tr><td>题干</td><td>题目本身。填空题的空位建议写成 <code>（　　）</code>。</td></tr>
+    <tr><td>选项A~F</td><td>只有选择题需要。有几个选项填几个，不必填满。</td></tr>
+    <tr><td><b>答案</b></td><td>见下方「答案格式速查」。</td></tr>
+    <tr><td>解析</td><td>选填。答题后会显示，建议写清出处或理由。</td></tr>
+  </table>
+
+  <h3>答案格式速查</h3>
+  <table>
+    <tr><th style="width:90px">题型</th><th>答案写法</th><th style="width:34%">示例</th></tr>
+    <tr><td>选择题</td><td>选项字母，如 <code>A</code>、<code>C</code></td><td><code>A</code></td></tr>
+    <tr><td>判断题</td><td>「正确」或「错误」（对/错/√/× 也认）</td><td><code>正确</code></td></tr>
+    <tr><td>填空题</td><td>多个可接受答案用 <code>|</code> 分隔；判分时<b>忽略空格与标点差异</b></td><td><code>一会儿|一瞬间</code></td></tr>
+    <tr><td>简答题</td><td>填参考答案。课堂上看答案后<b>老师自评</b>对错</td><td><code>把潮水比作白线和水墙</code></td></tr>
+  </table>
+
+  <div class="tip"><b>✔ 小技巧</b>一个 Excel 里放多篇课文没问题——用「课文」列区分即可；也支持<b>一个工作表一篇课文</b>（工作表名就是课文名），两种排布上传时都会被识别。</div>
+
+  <h3 id="s3-2">3.2 粘贴文本快速录题</h3>
+  <p>临时加几道题时最快：在「粘贴文本」标签里按下面的样子贴进去，点「解析并导入」。</p>
+  <pre class="sample"># 小壁虎借尾巴
+@年级 一下
+
+[选择] 小壁虎的尾巴断了以后怎么了？
+A. 自己长出了新尾巴
+B. 借了一条
+C. 没有长出来
+答案：A
+解析：小壁虎自己长出了新尾巴。
+
+[判断] 小壁虎向小鱼借到了尾巴。
+答案：错误</pre>
+  <p>第一行 <code># 课文名</code>，<code>@年级</code> 可省略，<code>[题型]</code> 可省略（自动判断）。</p>
+
+  <h3 id="s3-3">3.3 在网页里手动录入</h3>
+  <ol class="steps">
+    <li>在课文列表点某篇课文旁的「<b>管理题目</b>」（或先「新建课文」）。</li>
+    <li>点「新增题目」，选题型 → 填题干 → 填选项/答案 → 保存。<b>保存的瞬间，首页和答题页同步生效</b>。</li>
+    <li>每道题都可随时「编辑 / 上移 / 下移 / 删除」，改动同样即时生效。</li>
+  </ol>
+  <img class="shot" src="assets/tutorial/05-题目编辑.jpg" alt="题目管理列表">
+  <p class="cap">题目管理列表：每道题都能看到摘要与操作按钮。</p>
+  <img class="shot" src="assets/tutorial/06-编辑表单.jpg" alt="题目编辑表单">
+  <p class="cap">题目编辑表单：切换题型时，选项、答案输入框会自动变化。</p>
+
+  <div class="warn"><b>⚠ 正在答题时改题</b>如果某个班答到一半你去改题：被改动的题<b>旧作答会作废</b>（避免按旧答案显示判分），新加的题排在最后，删掉的题自动移出答题队列——都不用手动处理。</div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section id="s4">
+  <h2><span class="no">4</span>课堂提问怎么用</h2>
+  <p class="lead">课文页点「开始答题」进入答题页，建议连投影使用。</p>
+
+  <img class="shot" src="assets/tutorial/02-答题页.jpg" alt="答题页">
+  <p class="cap">答题页：答完立即显示对错、正确答案和解析；底部题号可任意跳题。</p>
+
+  <div class="cols">
+    <div class="card"><h4>练习 / 测试两种模式</h4><p><b>练习</b>：每答一题立刻判分（适合边讲边练）；<b>测试</b>：全部答完交卷才判分（适合小测）。</p></div>
+    <div class="card"><h4>投影大字</h4><p>答题页右上角「正常 / 大 / 特大」三档字号，教室后排也看得清。选择会被记住。</p></div>
+    <div class="card"><h4>键盘操作</h4><p><kbd>A</kbd>~<kbd>F</kbd> 选选项，<kbd>1</kbd>/<kbd>2</kbd> 判断对错，<kbd>Enter</kbd> 提交填空，<kbd>←</kbd>/<kbd>→</kbd> 翻题。</p></div>
+  </div>
+
+  <h3>四种题型的答题方式</h3>
+  <table>
+    <tr><th style="width:90px">题型</th><th>课堂上怎么操作</th></tr>
+    <tr><td>选择题</td><td>点选项即判分；先让学生举手/抢答，再点选验证。</td></tr>
+    <tr><td>判断题</td><td>点「正确」或「错误」。</td></tr>
+    <tr><td>填空题</td><td>输入答案回车。多个可接受答案（如 <code>一会儿|一瞬间</code>）任答一个都对。</td></tr>
+    <tr><td>简答题</td><td>展示学生答案后，点「查看参考答案」核对，再点「我答对了 / 需复习」自评。</td></tr>
+  </table>
+
+  <div class="tip"><b>✔ 进度可中断</b>答到一半关掉页面，下次打开同一篇课文会从上次的地方继续。</div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section id="s5">
+  <h2><span class="no">5</span>成绩与错题</h2>
+  <p class="lead">点「交卷看结果」进入结果页。</p>
+  <img class="shot" src="assets/tutorial/03-结果页.jpg" alt="结果页">
+  <p class="cap">结果页：正确率圆环、逐题回顾、错题清单，可直接打印留档。</p>
+  <ul>
+    <li><b>只练错题</b>：一键把本次答错的题组成新一轮练习，讲评课直接用。</li>
+    <li><b>历史成绩</b>：每篇课文记住最近一次成绩，显示在课文卡片上。</li>
+    <li><b>打印</b>：结果页可直接打印（Ctrl/⌘ + P），方便贴到成长档案或发给家长。</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 6 -->
+<section id="s6">
+  <h2><span class="no">6</span>备份与换电脑（重要）</h2>
+  <p class="lead">题目数据保存在<b>当前这台电脑的当前浏览器</b>里——换电脑、换浏览器、清除浏览器数据，都会回到空白。所以请养成备份习惯。</p>
+
+  <div class="danger"><b>‼ 一句话原则</b>批量录完题后，随手点一次「导出 Excel 题库」，把文件存到你的备课文件夹（或发到自己的邮箱 / 微信）。有这个文件，任何时候都能秒恢复。</div>
+
+  <table>
+    <tr><th style="width:200px">你想做什么</th><th>操作</th></tr>
+    <tr><td>备份数据</td><td>题库管理 → 「导出 Excel 题库」，得到一个可在 Excel 里直接编辑的 xlsx 存档。</td></tr>
+    <tr><td>恢复 / 换电脑</td><td>新电脑上打开网站 → 把备份的 xlsx 拖进上传区即可，题目原样恢复（含多答案、解析）。</td></tr>
+    <tr><td>和同事共享题库</td><td>把导出的 xlsx 发给同事，同事拖进自己的网站即可。</td></tr>
+    <tr><td>全年级共用一份、实时同步</td><td>需要部署到服务器（免费方案见 README「部署上线」章节），或联系懂技术的同事帮忙。</td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ 7 -->
+<section id="s7">
+  <h2><span class="no">7</span>常见问题</h2>
+
+  <details>
+    <summary>1. 双击打开后一片空白 / 样式错乱？</summary>
+    <p>多半是解压后<b>挪动了单独的文件</b>。<code>index.html</code> 必须和 <code>assets</code> 文件夹待在一起。重新解压一份即可。</p>
+  </details>
+
+  <details>
+    <summary>2. 顶部出现「当前浏览器禁止本地保存」的黄色提示条？</summary>
+    <p>你的浏览器（通常是 Safari 双击打开）不允许网页保存数据：网站能正常用，但<b>刷新后题目和进度会丢</b>。两个办法任选：</p>
+    <ul>
+      <li>装一个 <b>Chrome 或 Edge</b>，用它打开（推荐）；</li>
+      <li>或者继续用当前浏览器，但每次录完题立即「导出 Excel」备份，下次打开再导入。</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3. 上传 Excel 后提示「没有解析到题目」？</summary>
+    <p>按顺序检查：① 是否从「表头」那一行开始填（第一行是列名）；② 「题干」列不能为空；③ 选择题至少要 2 个选项并填了答案字母；④ 文件是 .xlsx / .csv 格式而不是 .et / .numbers（WPS 和 Numbers 请先「另存为 xlsx」）。</p>
+  </details>
+
+  <details>
+    <summary>4. 改了 Excel 再传，为什么有的课文没变化？</summary>
+    <p>上传时如果弹出「覆盖 / 追加」的询问：选<b>覆盖</b>才会用新表替换旧题；选了「追加」则是把新题接在旧题后面。另外请确认改的是<b>同一个课文名</b>——名字不同会当成新课文。</p>
+  </details>
+
+  <details>
+    <summary>5. 换了个浏览器打开，题库怎么空了？</summary>
+    <p>数据按浏览器分开保存（见第 6 节）。把之前导出的备份 xlsx 拖进去就恢复了。</p>
+  </details>
+
+  <details>
+    <summary>6. 想恢复到最初的示例题库？</summary>
+    <p>题库管理 → 底部「恢复示例题库」。它只会补齐示例课文，<b>不会动你自己录入的题目</b>。</p>
+  </details>
+
+  <details>
+    <summary>7. 想让全班学生用自己的设备答题、自动汇总成绩？</summary>
+    <p>当前版本定位是「老师大屏提问」，学生数据只在老师电脑上。需要学生各自作答并云端汇总的话，需要加一个后端服务——可以在部署时一并规划（见 README）。</p>
+  </details>
+
+  <details>
+    <summary>8. 上课途中断网了怎么办？</summary>
+    <p>完全不受影响——本系统双击打开就能用，全程不依赖网络。</p>
+  </details>
+
+  <p style="margin-top:22px" class="lead">更多部署（校园网 / 云服务器）与技术细节，见同目录下的 <code>README.md</code>。</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>
