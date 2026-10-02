@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>语文课堂提问系统 · 浏览器端测试</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 20px; }
+  pre { background: #f5f7fb; border: 1px solid #e3e8f0; border-radius: 10px; padding: 16px; font-size: 13.5px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px">语文课堂提问系统 · 浏览器端测试</h1>
+<p style="color:#6b7280;font-size:14px">这个页面必须通过 http 打开（例如 <code>bash tests/run.sh</code>），
+它会用一个隐藏的 iframe 真实驱动网站，走一遍「名单 → 随机分题 → 记录 → 小结」的完整流程。
+测试开始前会临时替换本机的题库数据，结束后自动还原。</p>
+<pre id="out">running…</pre>
+
+<script>
+const out = [];
+const ok = (cond, msg) => out.push((cond ? 'PASS  ' : 'FAIL  ') + msg);
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+// 1) 备份本机原有数据，测试结束后原样还原
+const backup = {};
+for (let i = 0; i < localStorage.length; i++) {
+  const k = localStorage.key(i);
+  backup[k] = localStorage.getItem(k);
+}
+const restore = () => {
+  localStorage.clear();
+  Object.keys(backup).forEach(k => localStorage.setItem(k, backup[k]));
+};
+
+// 2) 预置一个班 5 名学生
+localStorage.clear();
+localStorage.setItem('yw_quiz_roster_v1', JSON.stringify({
+  version: 1, activeClassId: 'c1',
+  classes: [{ id: 'c1', name: '四(1)班', students: [
+    { id: 's1', name: '张三' }, { id: 's2', name: '李四' }, { id: 's3', name: '王五' },
+    { id: 's4', name: '赵六' }, { id: 's5', name: '钱七' }
+  ] }]
+}));
+localStorage.setItem('yw_quiz_ask_draft_v1', JSON.stringify({
+  classId: 'c1', studentIds: ['s1', 's2'], lessonIds: [], types: ['choice', 'judge', 'fill', 'short'],
+  per: 2, noRepeat: true, pickMode: 'manual', randomCount: 2, preferNew: true
+}));
+
+const frame = document.createElement('iframe');
+frame.style.cssText = 'width:1280px;height:900px;border:0;position:absolute;left:-9999px;top:0';
+frame.src = '../index.html#/ask';
+let W = null, D = null;
+
+frame.onload = async () => {
+  W = frame.contentWindow;
+  D = frame.contentDocument;
+  W.confirm = () => true;
+  try {
+    await wait(200);
+
+    // ---- 提问设置页 ----
+    ok(!!D.querySelector('#askPreview'), '设置页渲染出底部提示');
+    ok(D.querySelectorAll('.student-chip.is-on').length === 2, '预置的 2 名学生处于选中态');
+    ok(/道题/.test(D.querySelector('#askPreview').textContent), '提示里显示了题目数量');
+    ok(D.querySelectorAll('.check-item.is-on').length >= 2, '默认选中全部课文');
+
+    // ---- 开始提问：随机分题 ----
+    D.querySelector('#btnStartAsk').click();
+    await wait(300);
+    ok(W.location.hash === '#/ask/run', '跳转到提问进行页');
+    ok(!!D.querySelector('.q-stem'), '渲染出题目');
+    ok(D.querySelector('.ask-student-name').textContent === '张三', '第一位学生是张三');
+    const a = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
+    ok(a && a.students.length === 2, '分配了 2 位学生');
+    ok(a.students.every(r => r.questions.length === 2), '每人 2 道题');
+    const qids = a.students[0].questions.concat(a.students[1].questions).map(q => q.qid);
+    ok(new Set(qids).size === 4, '4 道题互不重复（' + qids.join(',') + '）');
+
+    // ---- 记录与翻页 ----
+    D.querySelector('[data-mark="right"]').click();
+    await wait(150);
+    const a2 = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
+    ok(a2.students[0].marks[0] === 'right', '记录第一题答对');
+    ok(D.querySelector('.q-index').textContent.indexOf('第 2 题') >= 0, '自动跳到第 2 题');
+
+    // ---- 换一题 / 显示答案 ----
+    const before = JSON.parse(localStorage.getItem('yw_quiz_ask_v1')).students[0].questions[1].qid;
+    D.querySelector('#btnAskSwap').click();
+    await wait(150);
+    const after = JSON.parse(localStorage.getItem('yw_quiz_ask_v1')).students[0].questions[1].qid;
+    ok(before !== after, '「换一题」换成了另一道题');
+    D.querySelector('#btnAskReveal').click();
+    await wait(150);
+    ok(!!D.querySelector('.feedback.info'), '「显示答案」展开正确答案');
+
+    // ---- 切学生 / 结束 / 小结 ----
+    D.querySelector('#btnAskNextStudent').click();
+    await wait(150);
+    ok(D.querySelector('.ask-student-name').textContent === '李四', '切到第二位学生李四');
+    D.querySelector('#btnAskFinish').click();
+    await wait(250);
+    ok(!!D.querySelector('.ask-table'), '小结页渲染出逐人明细');
+    ok(D.querySelector('.ask-table').textContent.indexOf('张三') >= 0 &&
+       D.querySelector('.ask-table').textContent.indexOf('李四') >= 0, '明细里有两位学生');
+    ok(JSON.parse(localStorage.getItem('yw_quiz_ask_v1')).finished === true, '提问会话标记为已结束');
+
+    // ---- 再抽一轮 ----
+    D.querySelector('#btnAskAgain').click();
+    await wait(300);
+    const a4 = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
+    ok(a4.finished === false && a4.students.length === 2 && a4.students[0].marks.every(m => !m), '再抽一轮得到全新的分配');
+
+    // ---- 中途离开后还能找回这次提问 ----
+    W.location.hash = '#/ask';
+    await wait(250);
+    ok(!!D.querySelector('.ask-resume') && !!D.querySelector('a[href="#/ask/run"]'), '未结束的提问会在设置页给出「继续提问」入口');
+
+    // ---- 学生名单页 ----
+    W.location.hash = '#/roster';
+    await wait(300);
+    ok(D.querySelectorAll('.student-row').length === 5, '名单页显示 5 名学生');
+    ok(JSON.parse(localStorage.getItem('yw_quiz_roster_v1')).classes[0].students[0].askedCount === 2, '被提问次数自动累计');
+    ok(/已提问/.test(D.querySelector('.student-row').textContent), '名单里显示已提问次数');
+
+    D.querySelector('#btnImportToggle').click();
+    await wait(100);
+    D.querySelector('#importNames').value = '孙八, 周九\n吴十';
+    D.querySelector('#btnImportNames').click();
+    await wait(250);
+    ok(D.querySelectorAll('.student-row').length === 8, '批量粘贴名单后共 8 人');
+
+    // ---- 首页入口 ----
+    W.location.hash = '#/';
+    await wait(300);
+    ok(!!D.querySelector('[data-ask-lesson]'), '课文卡片上有「提问」按钮');
+    ok(!!D.querySelector('a[href="#/ask"]'), '首页有课堂提问入口');
+  } catch (e) {
+    out.push('FAIL  脚本异常：' + (e && e.message));
+  }
+  restore();
+  document.getElementById('out').textContent = out.join('\n') + '\nDONE';
+};
+document.body.appendChild(frame);
+</script>
+</body>
+</html>

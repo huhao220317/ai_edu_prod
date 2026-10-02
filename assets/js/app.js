@@ -12,7 +12,13 @@ const SESSION_KEY  = 'yw_quiz_session_v1';
 const SCORE_KEY    = 'yw_quiz_scores_v1';
 const DEMO_SEED_KEY = 'yw_quiz_demo_seed';
 
+/* 课堂提问相关 */
+const ROSTER_KEY    = 'yw_quiz_roster_v1';     // 学生名单：班级 + 学生
+const ASK_KEY       = 'yw_quiz_ask_v1';        // 正在进行 / 最近一次的提问
+const ASK_DRAFT_KEY = 'yw_quiz_ask_draft_v1';  // 提问设置页的选择（课文、题型、人数…）
+
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+const ALL_TYPES = ['choice', 'judge', 'fill', 'short'];
 
 /* ============================== 全局状态 ============================== */
 let bank = null;         // 题库
@@ -20,6 +26,11 @@ let session = null;      // 当前答题会话
 let manageTab = 'file';  // 题库管理页当前标签
 let manageEditing = null; // 正在编辑题目的课文 id（null = 题库管理首页）
 let draft = null;        // 题目编辑草稿：{ lessonId, qid, type, stem, options, answer, analysis }
+let roster = null;       // 学生名单：{ version, activeClassId, classes: [{ id, name, students: [...] }] }
+let assignment = null;   // 课堂提问会话：{ students: [{ studentId, name, questions, marks }], idx, qIdx, ... }
+let askDraft = null;     // 提问设置页的选择
+let askRevealed = false; // 提问进行页是否已展开答案（内存态，切题即收起）
+let rosterFilter = '';   // 学生名单页的搜索词
 
 const $  = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.prototype.slice.call((root || document).querySelectorAll(sel));
@@ -36,6 +47,20 @@ function uid(prefix) {
   return (prefix || 'id') + '-' + Date.now().toString(36) + '-' + uidSeq.toString(36) + Math.random().toString(36).slice(2, 7);
 }
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+
+/** 取整并限制在 [min, max] 区间内，非法输入返回默认值 */
+function clampInt(v, min, max, dflt) {
+  const n = parseInt(v, 10);
+  if (!isFinite(n)) return dflt;
+  return Math.max(min, Math.min(max, n));
+}
+
+/** 时间戳 →「10月2日」，用于名单里展示「上次被提问」 */
+function shortDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+}
 
 /** 归一化文本：去掉空白与中英文标点，用于答案比对 */
 function normText(s) {
@@ -851,12 +876,380 @@ function questionById(id) {
   return ls ? (ls.questions.find(q => q.id === id) || null) : null;
 }
 
+/* ============================== 学生名单：存储与工具 ============================== */
+/** 归一化名单数据，保证结构完整 */
+function normalizeRoster(raw) {
+  const out = { version: 1, activeClassId: '', classes: [] };
+  const classes = raw && Array.isArray(raw.classes) ? raw.classes : [];
+  classes.forEach(c => {
+    if (!c || typeof c !== 'object') return;
+    const students = [];
+    (Array.isArray(c.students) ? c.students : []).forEach(s => {
+      const name = String(typeof s === 'string' ? s : (s && s.name) || '').trim();
+      if (!name) return;
+      students.push({
+        id: (s && s.id) || uid('stu'),
+        name: name,
+        askedCount: Math.max(0, parseInt((s && s.askedCount) || 0, 10) || 0),
+        lastAskedAt: (s && s.lastAskedAt) || 0
+      });
+    });
+    out.classes.push({
+      id: c.id || uid('cls'),
+      name: String(c.name || '').trim() || '未命名班级',
+      students: students
+    });
+  });
+  if (!out.classes.length) out.classes.push({ id: uid('cls'), name: '我的班级', students: [] });
+  out.activeClassId = (raw && out.classes.some(c => c.id === raw.activeClassId)) ? raw.activeClassId : out.classes[0].id;
+  return out;
+}
+
+function loadRoster() {
+  try {
+    const raw = localStorage.getItem(ROSTER_KEY);
+    if (raw) return normalizeRoster(JSON.parse(raw));
+  } catch (e) { console.warn('[名单] 读取失败', e); }
+  return normalizeRoster(null);
+}
+
+function saveRoster() {
+  try { localStorage.setItem(ROSTER_KEY, JSON.stringify(roster)); return true; }
+  catch (e) { toast('保存失败：浏览器存储空间不可用', 'bad'); return false; }
+}
+
+/** 当前班级 */
+function activeClass() {
+  if (!roster || !roster.classes.length) return null;
+  return roster.classes.find(c => c.id === roster.activeClassId) || roster.classes[0];
+}
+
+/** 全校学生总数（首页统计用） */
+function totalStudents() {
+  if (!roster) return 0;
+  return roster.classes.reduce((s, c) => s + c.students.length, 0);
+}
+
+/** 把一段文本切成姓名：支持换行、逗号、顿号、分号、空格、Excel 整列粘贴 */
+function splitNames(text) {
+  return String(text == null ? '' : text)
+    .split(/[\s,，、;；|｜/]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+/** 往班级里加学生，返回新增 / 重名数量 */
+function addStudentsToClass(cls, names) {
+  let added = 0, dup = 0;
+  names.forEach(name => {
+    if (cls.students.some(s => s.name === name)) { dup++; return; }
+    cls.students.push({ id: uid('stu'), name: name, askedCount: 0, lastAskedAt: 0 });
+    added++;
+  });
+  return { added: added, dup: dup };
+}
+
+/* ============================== 课堂提问：存储与分配逻辑 ============================== */
+function loadAssignment() {
+  try {
+    const raw = localStorage.getItem(ASK_KEY);
+    if (!raw) return null;
+    const a = JSON.parse(raw);
+    if (!a || !Array.isArray(a.students) || !a.students.length) return null;
+    a.students.forEach(r => { if (!Array.isArray(r.marks)) r.marks = []; });
+    return a;
+  } catch (e) { return null; }
+}
+
+function saveAssignment() {
+  if (!assignment) return;
+  try { localStorage.setItem(ASK_KEY, JSON.stringify(assignment)); } catch (e) { /* 忽略 */ }
+}
+
+function defaultAskDraft() {
+  return {
+    classId: (roster && roster.activeClassId) || '',
+    studentIds: [],
+    lessonIds: [],
+    types: ALL_TYPES.slice(),
+    per: 1,
+    noRepeat: true,
+    pickMode: 'random',
+    randomCount: 4,
+    preferNew: true
+  };
+}
+
+function loadAskDraft() {
+  const d = defaultAskDraft();
+  try {
+    const raw = localStorage.getItem(ASK_DRAFT_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (saved && typeof saved === 'object') {
+        Object.keys(d).forEach(k => { if (saved[k] != null) d[k] = saved[k]; });
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  return d;
+}
+
+function saveAskDraft() {
+  try { localStorage.setItem(ASK_DRAFT_KEY, JSON.stringify(askDraft)); } catch (e) { /* 忽略 */ }
+}
+
+/** 启动时对齐设置：清掉已删除的课文 / 学生，保证新课文默认选中 */
+function initAskDraft() {
+  if (!askDraft) askDraft = loadAskDraft();
+  if (!roster.classes.some(c => c.id === askDraft.classId)) {
+    askDraft.classId = roster.activeClassId;
+    askDraft.studentIds = [];
+  }
+  const types = Array.isArray(askDraft.types) ? askDraft.types.filter(t => QUESTION_TYPES[t]) : [];
+  askDraft.types = types.length ? types : ALL_TYPES.slice();
+  const lessonIds = bank.lessons.map(l => l.id);
+  askDraft.lessonIds = (Array.isArray(askDraft.lessonIds) ? askDraft.lessonIds : []).filter(id => lessonIds.indexOf(id) >= 0);
+  if (!askDraft.lessonIds.length) askDraft.lessonIds = lessonIds.slice();   // 默认「全部课文」
+  const cls = roster.classes.find(c => c.id === askDraft.classId) || roster.classes[0];
+  const stuIds = cls ? cls.students.map(s => s.id) : [];
+  askDraft.studentIds = (Array.isArray(askDraft.studentIds) ? askDraft.studentIds : []).filter(id => stuIds.indexOf(id) >= 0);
+  askDraft.per = clampInt(askDraft.per, 1, 20, 1);
+  askDraft.pickMode = askDraft.pickMode === 'manual' ? 'manual' : 'random';
+  askDraft.noRepeat = askDraft.noRepeat !== false;
+}
+
+/** Fisher-Yates 洗牌，返回新数组 */
+function shuffleArray(list) {
+  const arr = list.slice();
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+  return arr;
+}
+
+/**
+ * 随机抽学生
+ * @param {Array} students 班级学生
+ * @param {number} n 抽几位
+ * @param {boolean} preferNew 优先抽被提问次数少的同学（抽到的机会更公平）
+ */
+function randomPickStudents(students, n, preferNew) {
+  const pool = students.slice();
+  const picked = [];
+  const want = Math.min(clampInt(n, 1, pool.length || 1, 1), pool.length);
+  while (picked.length < want && pool.length) {
+    let candidates = pool;
+    if (preferNew) {
+      const min = pool.reduce((m, s) => Math.min(m, s.askedCount || 0), Infinity);
+      const lean = pool.filter(s => (s.askedCount || 0) <= min);
+      if (lean.length) candidates = lean;
+    }
+    const s = candidates[Math.floor(Math.random() * candidates.length)];
+    picked.push(s);
+    pool.splice(pool.indexOf(s), 1);
+  }
+  return picked;
+}
+
+/** 把题目存成快照：提问过程中题库再改，也不影响本次提问 */
+function snapshotQuestion(lesson, q) {
+  return {
+    qid: q.id,
+    lessonId: lesson.id,
+    lessonTitle: lesson.title,
+    type: q.type,
+    stem: q.stem,
+    options: (q.options || []).slice(),
+    answer: q.answer || '',
+    analysis: q.analysis || ''
+  };
+}
+
+/** 按课文 + 题型筛出候选题库 */
+function buildAskPool(lessonIds, types) {
+  const ids = lessonIds || [];
+  const ts = types || [];
+  const pool = [];
+  bank.lessons.forEach(l => {
+    if (ids.indexOf(l.id) < 0) return;
+    l.questions.forEach(q => { if (ts.indexOf(q.type) >= 0) pool.push(snapshotQuestion(l, q)); });
+  });
+  return pool;
+}
+
+/**
+ * 随机分配题目：每人 per 道
+ * 先把整个题库洗牌后按顺序发放，因此题库够用时「同学之间不会重题」；
+ * 不够时自动开启第二轮，但同一位学生手里不会出现重复的题。
+ */
+function assignQuestions(pool, students, per) {
+  const enough = pool.length >= students.length * per;
+  const plan = students.map(s => ({ studentId: s.id, name: s.name, questions: [], marks: [] }));
+  if (!pool.length || per <= 0) return { plan: plan, enough: false };
+
+  let bag = [];
+  let cursor = 0;
+  const draw = () => {
+    if (cursor >= bag.length) { bag = shuffleArray(pool); cursor = 0; }
+    return bag[cursor++];
+  };
+
+  plan.forEach(row => {
+    const seen = {};
+    let guard = 0;
+    while (row.questions.length < per && guard++ < per * 8 + 40) {
+      const q = draw();
+      if (!q) break;
+      if (seen[q.qid]) {
+        if (pool.length <= row.questions.length) break;   // 题库比题目数量还小，只能重复
+        continue;
+      }
+      seen[q.qid] = true;
+      row.questions.push(deepClone(q));
+    }
+    row.marks = row.questions.map(() => '');
+  });
+  return { plan: plan, enough: enough };
+}
+
+/** 题库不够时先问一句，避免老师看到意外的重复题目 */
+function confirmPoolShortage(poolSize, studentCount, per) {
+  if (poolSize >= studentCount * per) return true;
+  return confirm('所选范围里一共 ' + poolSize + ' 道题，要给 ' + studentCount + ' 位学生各抽 ' + per + ' 道。\n\n' +
+    '点「确定」= 允许部分题目在同学之间重复使用，继续提问\n' +
+    '点「取消」= 返回调整课文范围或题目数量');
+}
+
+/** 用当前设置生成一次提问会话 */
+function createAssignment(opts) {
+  const res = assignQuestions(opts.pool, opts.students, opts.per);
+  const plan = res.plan.filter(r => r.questions.length);
+  if (!plan.length) { toast('没有可以分配的题目', 'bad'); return; }
+  const skipped = res.plan.length - plan.length;
+  const types = (opts.types && opts.types.length ? opts.types : askDraft.types).slice();
+
+  assignment = {
+    id: uid('ask'),
+    at: Date.now(),
+    classId: opts.cls ? opts.cls.id : '',
+    className: opts.cls ? opts.cls.name : '',
+    lessonIds: opts.lessonIds.slice(),
+    lessonTitles: bank.lessons.filter(l => opts.lessonIds.indexOf(l.id) >= 0).map(l => l.title),
+    types: types,
+    per: opts.per,
+    noRepeat: !!askDraft.noRepeat,
+    reused: !res.enough,
+    pool: opts.pool,
+    students: plan,
+    idx: 0,
+    qIdx: 0,
+    finished: false,
+    finishedAt: 0
+  };
+
+  // 记录被提问次数，方便下次「优先抽提问次数少的同学」
+  const now = Date.now();
+  opts.students.forEach(s => { s.askedCount = (s.askedCount || 0) + 1; s.lastAskedAt = now; });
+  saveRoster();
+  saveAssignment();
+  askRevealed = false;
+
+  if (parseRoute().name === 'askRun') rerenderAskRun();
+  else location.hash = '#/ask/run';
+
+  if (skipped) toast('题库题目不够，有 ' + skipped + ' 位学生没有分到题目', 'bad');
+  else toast('已为 ' + plan.length + ' 位学生随机分配题目' + (assignment.reused ? '（部分题目重复）' : ''), 'ok');
+}
+
+/** 开始提问：校验设置 → 生成分配 */
+function startAsk() {
+  const cls = activeClass();
+  if (!cls) { toast('请先创建班级', 'bad'); return; }
+  const picked = cls.students.filter(s => askDraft.studentIds.indexOf(s.id) >= 0);
+  if (!picked.length) { toast('请至少选一名学生', 'bad'); return; }
+  if (!askDraft.lessonIds.length) { toast('请至少选一篇课文', 'bad'); return; }
+  if (!askDraft.types.length) { toast('请至少选一种题型', 'bad'); return; }
+
+  const per = clampInt(askDraft.per, 1, 20, 1);
+  const pool = buildAskPool(askDraft.lessonIds, askDraft.types);
+  if (!pool.length) { toast('所选范围里没有题目，换一篇课文或题型试试', 'bad'); return; }
+  if (!confirmPoolShortage(pool.length, picked.length, per)) return;
+
+  createAssignment({ cls: cls, students: picked, lessonIds: askDraft.lessonIds, per: per, pool: pool, types: askDraft.types });
+}
+
+/** 小结页「再抽一轮」：同一批学生、同样的范围，重新随机分题 */
+function askAgain() {
+  if (!assignment) return;
+  const cls = roster.classes.find(c => c.id === assignment.classId) || activeClass();
+  const students = [];
+  (assignment.students || []).forEach(r => {
+    const s = cls ? cls.students.find(x => x.id === r.studentId) : null;
+    if (s) students.push(s);
+  });
+  if (!students.length) { toast('名单里找不到这些学生了，请重新设置', 'bad'); location.hash = '#/ask'; return; }
+
+  const lessonIds = (assignment.lessonIds || []).filter(id => bank.lessons.some(l => l.id === id));
+  if (!lessonIds.length) { toast('提问范围里的课文已经不存在了，请重新设置', 'bad'); location.hash = '#/ask'; return; }
+  const types = (assignment.types && assignment.types.length) ? assignment.types : ALL_TYPES.slice();
+  const pool = buildAskPool(lessonIds, types);
+  if (!pool.length) { toast('所选范围里没有题目了，请重新设置', 'bad'); location.hash = '#/ask'; return; }
+  if (!confirmPoolShortage(pool.length, students.length, assignment.per)) return;
+
+  createAssignment({ cls: cls, students: students, lessonIds: lessonIds, per: assignment.per, pool: pool, types: types });
+}
+
+/** 结束提问 → 小结 */
+function finishAsk() {
+  if (!assignment) return;
+  const left = countUnmarked();
+  if (left && !confirm('还有 ' + left + ' 道题没有记录，确定结束本次提问吗？')) return;
+  assignment.finished = true;
+  assignment.finishedAt = Date.now();
+  saveAssignment();
+  rerenderAskRun();
+}
+
+function countUnmarked() {
+  let n = 0;
+  (assignment ? assignment.students : []).forEach(r => {
+    r.questions.forEach((q, i) => { if (!r.marks[i]) n++; });
+  });
+  return n;
+}
+
+/** 换一题：把当前题换成题库里还没用过的另一道 */
+function swapCurrentQuestion() {
+  if (!assignment || assignment.finished) return;
+  const row = assignment.students[assignment.idx];
+  if (!row || !row.questions.length) return;
+  const cur = row.questions[assignment.qIdx];
+  const used = row.questions.map(x => x.qid);
+  let candidates = (assignment.pool || []).filter(q => used.indexOf(q.qid) < 0);
+  let warnReuse = false;
+  if (!candidates.length) {
+    candidates = (assignment.pool || []).filter(q => q.qid !== cur.qid);
+    warnReuse = true;
+  }
+  if (!candidates.length) { toast('题库里没有可以替换的题目了', 'bad'); return; }
+  const pick = candidates[Math.floor(Math.random() * candidates.length)];
+  row.questions[assignment.qIdx] = deepClone(pick);
+  row.marks[assignment.qIdx] = '';
+  askRevealed = false;
+  saveAssignment();
+  toast(warnReuse ? '已换题（题库不够，可能和别的同学重复）' : '已换一题', 'ok');
+  rerenderAskRun();
+}
+
 /* ============================== 路由 ============================== */
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (!parts.length) return { name: 'home' };
   if (parts[0] === 'manage') return { name: 'manage' };
+  if (parts[0] === 'roster') return { name: 'roster' };
+  if (parts[0] === 'ask')    return { name: parts[1] === 'run' ? 'askRun' : 'ask' };
   if (parts[0] === 'quiz')   return { name: 'quiz',   id: decodeURIComponent(parts[1] || '') };
   if (parts[0] === 'result') return { name: 'result', id: decodeURIComponent(parts[1] || '') };
   return { name: 'home' };
@@ -867,13 +1260,20 @@ function render(keepScroll) {
   const main = $('#main');
   $$('.nav a[data-nav]').forEach(a => {
     const key = a.getAttribute('data-nav');
-    a.classList.toggle('is-active', (key === 'home' && (route.name === 'home' || route.name === 'quiz' || route.name === 'result')) || (key === 'manage' && route.name === 'manage'));
+    a.classList.toggle('is-active',
+      (key === 'home' && (route.name === 'home' || route.name === 'quiz' || route.name === 'result')) ||
+      (key === 'manage' && route.name === 'manage') ||
+      (key === 'roster' && route.name === 'roster') ||
+      (key === 'ask' && (route.name === 'ask' || route.name === 'askRun')));
   });
 
-  if (route.name === 'home')        main.innerHTML = viewHome();
-  else if (route.name === 'manage') main.innerHTML = viewManage();
-  else if (route.name === 'quiz')   main.innerHTML = viewQuiz(route.id);
-  else if (route.name === 'result') main.innerHTML = viewResult(route.id);
+  if (route.name === 'home')         main.innerHTML = viewHome();
+  else if (route.name === 'manage')  main.innerHTML = viewManage();
+  else if (route.name === 'quiz')    main.innerHTML = viewQuiz(route.id);
+  else if (route.name === 'result')  main.innerHTML = viewResult(route.id);
+  else if (route.name === 'roster')  main.innerHTML = viewRoster();
+  else if (route.name === 'ask')     main.innerHTML = viewAsk();
+  else if (route.name === 'askRun')  main.innerHTML = viewAskRun();
 
   if (!keepScroll) window.scrollTo({ top: 0, behavior: 'auto' });
 }
@@ -883,6 +1283,27 @@ function rerenderManage() {
   if (parseRoute().name !== 'manage') { render(); return; }
   render(true);
   bindManage();
+}
+
+/** 学生名单页就地重绘 */
+function rerenderRoster() {
+  if (parseRoute().name !== 'roster') { render(); return; }
+  render(true);
+  bindRoster();
+}
+
+/** 提问设置页就地重绘 */
+function rerenderAskPage() {
+  if (parseRoute().name !== 'ask') { render(); return; }
+  render(true);
+  bindAsk();
+}
+
+/** 提问进行页就地重绘 */
+function rerenderAskRun() {
+  if (parseRoute().name !== 'askRun') { render(); return; }
+  render(true);
+  bindAskRun();
 }
 
 /* ============================== 视图：首页 ============================== */
@@ -916,7 +1337,10 @@ function viewHome() {
           '<span class="pill pill-primary">共 ' + n + ' 题</span>' +
           (sc && n ? '<span class="pill ' + (sc.rate >= 80 ? 'pill-success' : 'pill-accent') + '">上次 ' + sc.rate + '%</span>' : '') +
           (n
-            ? '<a class="btn btn-primary btn-sm" href="#/quiz/' + encodeURIComponent(l.id) + '">开始答题</a>'
+            ? '<div class="lesson-foot-actions">' +
+                '<button class="btn btn-ghost btn-sm" data-ask-lesson="' + esc(l.id) + '">' + icon('mic') + '提问</button>' +
+                '<a class="btn btn-primary btn-sm" href="#/quiz/' + encodeURIComponent(l.id) + '">开始答题</a>' +
+              '</div>'
             : '<button class="btn btn-ghost btn-sm" data-edit-lesson="' + esc(l.id) + '">去加题目</button>') +
         '</div>' +
       '</article>';
@@ -926,15 +1350,16 @@ function viewHome() {
   return '<div class="view">' +
     '<section class="hero">' +
       '<h1>课文随堂提问 · 一问一答见真章</h1>' +
-      '<p>按课文组织题库，题目由老师自己上传。课堂上打开网页即可逐题提问、即时判分，错题一目了然。</p>' +
+      '<p>按课文组织题库，题目由老师自己上传。课堂上可以随机点名、自动给每位学生分不同的题，也可以让学生自己逐题练习、即时判分。</p>' +
       '<div class="hero-stats">' +
         '<div class="hero-stat"><b>' + lessons.length + '</b><span>篇课文</span></div>' +
         '<div class="hero-stat"><b>' + totalQ + '</b><span>道题目</span></div>' +
+        '<div class="hero-stat"><b>' + totalStudents() + '</b><span>名学生</span></div>' +
         '<div class="hero-stat"><b>4</b><span>种题型</span></div>' +
-        '<div class="hero-stat"><b>0</b><span>依赖 / 秒开</span></div>' +
       '</div>' +
       '<div class="hero-actions">' +
-        (lessons.length ? '<a class="btn btn-light btn-lg" href="#/quiz/' + encodeURIComponent(lessons[0].id) + '">' + icon('book') + '开始答题</a>' : '') +
+        '<a class="btn btn-light btn-lg" href="#/ask">' + icon('mic') + '课堂提问</a>' +
+        (lessons.length ? '<a class="btn btn-ghost btn-lg" href="#/quiz/' + encodeURIComponent(lessons[0].id) + '">' + icon('book') + '开始答题</a>' : '') +
         '<a class="btn btn-ghost btn-lg" href="#/manage">' + icon('upload') + '上传题目</a>' +
       '</div>' +
     '</section>' +
@@ -1207,6 +1632,454 @@ function viewResult(lessonId) {
     '</section>' +
 
     (wrongs.length ? '<div class="section-head" style="margin-top:30px"><div><h2>错题回顾</h2><p>把这 ' + wrongs.length + ' 道题重新读一遍原文</p></div></div>' + wrongHtml : '') +
+  '</div>';
+}
+
+/* ============================== 视图：学生名单 ============================== */
+function viewRoster() {
+  const classes = roster.classes;
+  const cls = activeClass();
+  const students = cls ? cls.students : [];
+  const askedTotal = students.reduce((s, x) => s + (x.askedCount || 0), 0);
+
+  const rows = students.map(s =>
+    '<li class="student-row">' +
+      '<span class="student-name">' + esc(s.name) + '</span>' +
+      '<span class="student-meta">' +
+        (s.askedCount ? '已提问 ' + s.askedCount + ' 次' + (s.lastAskedAt ? ' · 上次 ' + shortDate(s.lastAskedAt) : '') : '还没被提问过') +
+      '</span>' +
+      '<button class="btn btn-ghost btn-sm" data-student-edit="' + esc(s.id) + '">改名</button>' +
+      '<button class="icon-btn icon-btn-sm is-danger" data-student-del="' + esc(s.id) + '" title="从名单里删除" aria-label="删除">' + icon('trash') + '</button>' +
+    '</li>').join('');
+
+  return '<div class="view">' +
+    '<div class="section-head">' +
+      '<div><h2>学生名单</h2><p>把每个班的学生名单维护好，课堂提问就能直接随机点名。</p></div>' +
+      '<div class="quiz-actions">' +
+        '<a class="btn btn-primary btn-sm" href="#/ask">' + icon('mic') + '课堂提问</a>' +
+        '<a class="btn btn-ghost btn-sm" href="#/">' + icon('arrow-l') + '返回课文列表</a>' +
+      '</div>' +
+    '</div>' +
+
+    '<section class="panel card">' +
+      '<h3>' + icon('users') + '班级</h3>' +
+      '<p class="panel-desc">一位老师往往教好几个班，可以在这里分别维护名单。</p>' +
+      '<div class="class-tabs">' +
+        classes.map(c =>
+          '<button type="button" class="class-tab' + (c.id === cls.id ? ' is-active' : '') + '" data-class="' + esc(c.id) + '">' +
+            esc(c.name) + '<small>' + c.students.length + ' 人</small>' +
+          '</button>').join('') +
+        '<button type="button" class="class-tab is-add" id="btnNewClass">＋ 新建班级</button>' +
+      '</div>' +
+      '<div class="btn-row">' +
+        '<button class="btn btn-ghost btn-sm" id="btnRenameClass">重命名班级</button>' +
+        '<button class="btn btn-ghost btn-sm" id="btnDelClass">删除班级</button>' +
+        '<button class="btn btn-ghost btn-sm" id="btnClearClass">清空本班名单</button>' +
+      '</div>' +
+    '</section>' +
+
+    '<section class="panel card">' +
+      '<h3>' + icon('users') + esc(cls.name) + ' · 共 ' + students.length + ' 人</h3>' +
+      '<div class="roster-add">' +
+        '<input type="text" id="newStudentName" placeholder="输入学生姓名，按回车添加；也可以一次粘贴多个名字" autocomplete="off">' +
+        '<button class="btn btn-primary" id="btnAddStudent">' + icon('plus') + '添加</button>' +
+      '</div>' +
+      '<div class="roster-bar">' +
+        '<button class="btn btn-ghost btn-sm" id="btnImportToggle">批量粘贴名单</button>' +
+        (students.length ? '<button class="btn btn-ghost btn-sm" id="btnExportRoster">' + icon('download') + '导出名单</button>' : '') +
+        (askedTotal ? '<span class="pill">累计提问 ' + askedTotal + ' 次</span>' : '') +
+        '<span class="qedit-grow"></span>' +
+        (students.length > 8 ? '<div class="search-field search-field-sm">' + icon('search') + '<input type="search" id="studentSearch" placeholder="搜索学生" value="' + esc(rosterFilter) + '" aria-label="搜索学生"></div>' : '') +
+      '</div>' +
+      '<div class="import-panel hidden" id="importPanel">' +
+        '<textarea id="importNames" class="code-input code-input-sm" placeholder="一行一个名字，例如：&#10;张三&#10;李四&#10;王五&#10;&#10;支持从 Excel 整列复制粘贴，也支持用逗号、顿号、空格分隔。重名会自动跳过。" aria-label="批量导入学生名单"></textarea>' +
+        '<div class="btn-row">' +
+          '<button class="btn btn-primary btn-sm" id="btnImportNames">' + icon('check') + '导入名单</button>' +
+          '<button class="btn btn-ghost btn-sm" id="btnImportCancel">取消</button>' +
+        '</div>' +
+      '</div>' +
+      (students.length
+        ? '<ul class="student-list" id="studentList">' + rows + '</ul>'
+        : '<p class="muted" style="margin-top:16px">还没有学生。可以在上面逐个添加，或点「批量粘贴名单」把整份名单贴进来。</p>') +
+      (students.length ? '<p class="tip-line">「已提问 N 次」是自动累计的：在课堂提问页勾选「优先抽提问次数少的同学」时，会优先照顾被提问少的学生。</p>' : '') +
+    '</section>' +
+  '</div>';
+}
+
+/* ============================== 视图：课堂提问（设置） ============================== */
+function viewAsk() {
+  const cls = roster.classes.find(c => c.id === askDraft.classId) || activeClass();
+  if (askDraft.classId !== cls.id) { askDraft.classId = cls.id; askDraft.studentIds = []; saveAskDraft(); }
+
+  const head = '<div class="section-head">' +
+    '<div><h2>课堂提问</h2><p>选好学生和题目范围，系统会给每位学生随机分不同的题，课堂上一个个提问。</p></div>' +
+    '<div class="quiz-actions">' +
+      '<a class="btn btn-ghost btn-sm" href="#/roster">' + icon('users') + '管理学生名单</a>' +
+      '<a class="btn btn-ghost btn-sm" href="#/">' + icon('arrow-l') + '返回课文列表</a>' +
+    '</div>' +
+  '</div>';
+
+  if (!bank.lessons.length) {
+    return '<div class="view">' + head + '<div class="empty">' + icon('book') +
+      '<h3>题库还是空的</h3><p>先上传或录入题目，才能安排课堂提问。</p>' +
+      '<a class="btn btn-primary" href="#/manage">' + icon('upload') + '去题库管理</a></div></div>';
+  }
+  if (!cls.students.length) {
+    return '<div class="view">' + head + '<div class="empty">' + icon('users') +
+      '<h3>「' + esc(cls.name) + '」还没有学生</h3><p>先把班级名单填好，回来就能随机点名了。</p>' +
+      '<a class="btn btn-primary" href="#/roster">' + icon('users') + '去添加学生</a></div></div>';
+  }
+
+  // 上一次提问还没结束（比如中途点到别处去了）→ 顶部给个回来的入口
+  let resumeBar = '';
+  if (assignment && !assignment.finished) {
+    const qCount = assignment.students.reduce((s, r) => s + r.questions.length, 0);
+    resumeBar = '<div class="ask-resume">' + icon('mic') +
+      '<span>上一次提问还没结束（' + assignment.students.length + ' 位学生 · ' + qCount + ' 道题）。</span>' +
+      '<a class="btn btn-primary btn-sm" href="#/ask/run">继续提问</a>' +
+      '<button class="btn btn-ghost btn-sm" id="btnAskWrapUp">结束并看小结</button>' +
+    '</div>';
+  }
+
+  const picked = cls.students.filter(s => askDraft.studentIds.indexOf(s.id) >= 0);
+  const per = clampInt(askDraft.per, 1, 20, 1);
+  const byType = { choice: 0, judge: 0, fill: 0, short: 0 };
+  bank.lessons.forEach(l => {
+    if (askDraft.lessonIds.indexOf(l.id) < 0) return;
+    l.questions.forEach(q => { if (byType[q.type] != null) byType[q.type]++; });
+  });
+
+  const chips = cls.students.map(s => {
+    const on = askDraft.studentIds.indexOf(s.id) >= 0;
+    return '<button type="button" class="student-chip' + (on ? ' is-on' : '') + '" data-pick-student="' + esc(s.id) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+      esc(s.name) + (s.askedCount ? '<small>已问 ' + s.askedCount + ' 次</small>' : '') +
+    '</button>';
+  }).join('');
+
+  const randomRow = askDraft.pickMode === 'random'
+    ? '<div class="pick-row">' +
+        '<span>抽取</span>' +
+        '<input type="number" id="drawCount" min="1" max="' + cls.students.length + '" value="' + clampInt(askDraft.randomCount, 1, cls.students.length, 1) + '" aria-label="抽取人数">' +
+        '<span>人</span>' +
+        '<button class="btn btn-primary btn-sm" id="btnDraw">' + icon('dice') + '随机抽取</button>' +
+        '<label class="inline-check"><input type="checkbox" id="drawPreferNew"' + (askDraft.preferNew ? ' checked' : '') + '>优先抽提问次数少的同学</label>' +
+      '</div>'
+    : '<p class="tip-line">点下面的名字选中或取消，可以多选。选好后直接开始提问。</p>';
+
+  const lessonList = bank.lessons.map(l => {
+    const on = askDraft.lessonIds.indexOf(l.id) >= 0;
+    return '<label class="check-item' + (on ? ' is-on' : '') + '" data-lesson-check="' + esc(l.id) + '">' +
+      '<input type="checkbox"' + (on ? ' checked' : '') + '>' +
+      '<span><b>' + esc(l.title) + '</b>' + (l.grade ? ' <small>' + esc(l.grade) + '</small>' : '') + '</span>' +
+      '<span class="qedit-grow"></span>' +
+      '<small>' + l.questions.length + ' 题</small>' +
+    '</label>';
+  }).join('');
+
+  const typeBtns = ALL_TYPES.map(t =>
+    '<button type="button" class="type-toggle' + (askDraft.types.indexOf(t) >= 0 ? ' is-on' : '') + '" data-type-toggle="' + t + '">' +
+      QUESTION_TYPES[t] + '<small>' + byType[t] + ' 题</small>' +
+    '</button>').join('');
+
+  return '<div class="view">' + head + resumeBar +
+    '<div class="ask-grid">' +
+
+      '<section class="panel card">' +
+        '<h3><span class="step-no">1</span>选学生</h3>' +
+        '<div class="ask-class-row">' +
+          '<label for="askClass">班级</label>' +
+          '<select id="askClass">' + roster.classes.map(c =>
+            '<option value="' + esc(c.id) + '"' + (c.id === cls.id ? ' selected' : '') + '>' + esc(c.name) + '（' + c.students.length + ' 人）</option>').join('') +
+          '</select>' +
+        '</div>' +
+        '<div class="mode-switch">' +
+          '<button type="button" class="' + (askDraft.pickMode === 'random' ? 'is-on' : '') + '" data-pickmode="random">' + icon('dice') + '随机抽取</button>' +
+          '<button type="button" class="' + (askDraft.pickMode === 'manual' ? 'is-on' : '') + '" data-pickmode="manual">' + icon('users') + '手动指定</button>' +
+        '</div>' +
+        randomRow +
+        '<div class="student-picker" id="studentPicker">' + chips + '</div>' +
+        '<div class="btn-row" style="margin-top:12px">' +
+          '<button class="btn btn-ghost btn-sm" id="btnPickAll">全选</button>' +
+          '<button class="btn btn-ghost btn-sm" id="btnPickNone">清空</button>' +
+        '</div>' +
+        '<p class="ask-selected">已选 <b id="askSelectedCount">' + picked.length + '</b> 人：' +
+          '<span id="askSelectedNames">' + (picked.length ? esc(picked.map(s => s.name).join('、')) : '还没有选学生') + '</span></p>' +
+      '</section>' +
+
+      '<section class="panel card">' +
+        '<h3><span class="step-no">2</span>选课文与题型</h3>' +
+        '<div class="fld"><label>课文 <span class="fld-hint">可以多选</span></label>' +
+          '<div class="check-list">' + lessonList + '</div>' +
+          '<div class="btn-row" style="margin-top:8px">' +
+            '<button class="btn btn-ghost btn-sm" id="btnLessonAll">全选</button>' +
+            '<button class="btn btn-ghost btn-sm" id="btnLessonNone">全不选</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="fld"><label>题型 <span class="fld-hint">可以混搭，比如只抽选择题和填空题</span></label>' +
+          '<div class="type-toggles">' + typeBtns + '</div>' +
+        '</div>' +
+        '<div class="fld"><label>题目数量</label>' +
+          '<div class="pick-row" style="margin-top:0">' +
+            '<span>每位学生抽</span>' +
+            '<input type="number" id="askPer" min="1" max="20" value="' + per + '" aria-label="每位学生的题目数量">' +
+            '<span>道题</span>' +
+          '</div>' +
+          '<label class="inline-check" style="margin-top:10px"><input type="checkbox" id="askNoRepeat"' + (askDraft.noRepeat ? ' checked' : '') + '>不同学生之间不重复出题</label>' +
+          '<p class="fld-hint">题库里的题目不够时，会自动循环使用并提前提示。</p>' +
+        '</div>' +
+      '</section>' +
+    '</div>' +
+
+    '<section class="panel card ask-go">' +
+      '<div class="ask-go-inner">' +
+        '<div class="ask-preview" id="askPreview">' + askPreviewHtml(picked, per) + '</div>' +
+        '<button class="btn btn-primary btn-lg" id="btnStartAsk">' + icon('mic') + '开始提问</button>' +
+      '</div>' +
+      '<p class="tip-line">开始后会进入提问界面：一次显示一位学生的一道题，可以随时「显示答案」核对，学生答完点「答对 / 答错」记录。</p>' +
+    '</section>' +
+  '</div>';
+}
+
+/** 设置页底部的一行提示：范围里有多少题、够不够分 */
+function askPreviewHtml(picked, per) {
+  const pool = buildAskPool(askDraft.lessonIds, askDraft.types);
+  if (!askDraft.lessonIds.length) return '<span class="ask-preview-warn">还没有选课文</span>';
+  if (!askDraft.types.length) return '<span class="ask-preview-warn">还没有选题型</span>';
+  if (!pool.length) return '<span class="ask-preview-warn">所选范围里没有题目</span>';
+  if (!picked.length) return '选题范围共 <b>' + pool.length + '</b> 道题，选好学生就可以开始';
+  const need = picked.length * per;
+  return '选题范围共 <b>' + pool.length + '</b> 道题 · ' + picked.length + ' 人 × ' + per + ' 题 = <b>' + need + '</b> 题 · ' +
+    (pool.length >= need
+      ? '<span class="ask-preview-ok">题目充足，同学之间不会重题</span>'
+      : '<span class="ask-preview-warn">题目不够，会有重复</span>');
+}
+
+/* ============================== 视图：课堂提问（进行中） ============================== */
+const ALL_MARK_KEYS = ['right', 'wrong', 'skip'];
+const MARK_TEXT = { right: '答对', wrong: '答错', skip: '跳过' };
+
+function viewAskRun() {
+  if (!assignment) {
+    return '<div class="view"><div class="empty">' + icon('mic') +
+      '<h3>还没有正在进行的提问</h3><p>先到「课堂提问」页选好学生和题目范围，再开始提问。</p>' +
+      '<a class="btn btn-primary" href="#/ask">' + icon('mic') + '去安排提问</a></div></div>';
+  }
+  if (assignment.finished) return viewAskSummary();
+
+  const total = assignment.students.length;
+  const row = assignment.students[assignment.idx];
+  if (!row) return viewAskSummary();
+  const q = row.questions[assignment.qIdx];
+  const mark = row.marks[assignment.qIdx] || '';
+  const doneCount = row.marks.filter(Boolean).length;
+  const rightCount = row.marks.filter(m => m === 'right').length;
+
+  let questionCard;
+  if (!q) {
+    questionCard = '<section class="card q-card"><p class="muted">这位学生还没有分到题目。</p></section>';
+  } else {
+    questionCard = '<section class="card q-card">' +
+      '<div class="q-head">' +
+        '<span class="q-index">第 ' + (assignment.qIdx + 1) + ' 题</span>' +
+        '<span class="q-type">' + QUESTION_TYPES[q.type] + '</span>' +
+        '<span class="q-source">《' + esc(q.lessonTitle) + '》</span>' +
+        '<span class="qedit-grow"></span>' +
+        ((assignment.pool || []).length > 1 ? '<button class="btn btn-ghost btn-sm" id="btnAskSwap">' + icon('refresh') + '换一题</button>' : '') +
+        '<button class="btn ' + (askRevealed ? 'btn-primary' : 'btn-ghost') + ' btn-sm" id="btnAskReveal">' + icon('eye') + (askRevealed ? '收起答案' : '显示答案') + '</button>' +
+      '</div>' +
+      '<h3 class="q-stem">' + esc(q.stem) + '</h3>' +
+      renderAskAnswer(q, askRevealed) +
+      '<div class="ask-mark">' +
+        '<span class="ask-mark-label">记录：</span>' +
+        ALL_MARK_KEYS.map(function (k) {
+          return '<button class="btn btn-sm mark-btn' + (mark === k ? ' is-on-' + k : '') + '" data-mark="' + k + '">' +
+            (k === 'right' ? icon('check') : k === 'wrong' ? icon('x') : '') + MARK_TEXT[k] +
+          '</button>';
+        }).join('') +
+        '<span class="muted ask-mark-hint">' +
+          (mark ? '已记录「' + MARK_TEXT[mark] + '」，再点一次可取消' : '学生答完在这里点一下，会自动跳到下一题') +
+        '</span>' +
+      '</div>' +
+    '</section>';
+  }
+
+  const isLastQ = assignment.qIdx >= row.questions.length - 1;
+  const nextName = assignment.idx < total - 1 ? assignment.students[assignment.idx + 1].name : '';
+  let navRight;
+  if (!isLastQ) {
+    navRight = '<button class="btn btn-primary" id="btnAskNextQ">下一题' + icon('arrow-r') + '</button>';
+  } else if (assignment.idx < total - 1) {
+    navRight = '<button class="btn btn-primary" id="btnAskNextStudent2">下一位学生：' + esc(nextName) + icon('arrow-r') + '</button>';
+  } else {
+    navRight = '<button class="btn btn-primary" id="btnAskFinish2">' + icon('check') + '结束并查看小结</button>';
+  }
+
+  const studentMap = assignment.students.map((r, i) => {
+    const done = r.marks.filter(Boolean).length;
+    const right = r.marks.filter(m => m === 'right').length;
+    let cls = 'ask-map-chip';
+    if (i === assignment.idx) cls += ' is-current';
+    else if (done && done >= r.questions.length) cls += ' is-done';
+    return '<button class="' + cls + '" data-ask-goto="' + i + '">' + esc(r.name) +
+      '<small>' + (r.questions.length ? right + '/' + r.questions.length + ' 对' : '无题') + '</small>' +
+    '</button>';
+  }).join('');
+
+  return '<div class="view">' +
+    '<div class="quiz-topbar">' +
+      '<div class="quiz-title">' +
+        '<a class="btn btn-ghost btn-sm" href="#/ask">' + icon('arrow-l') + '返回设置</a>' +
+        '<h2>课堂提问 · ' + esc(assignment.className || '') + '</h2>' +
+      '</div>' +
+      '<div class="quiz-actions">' +
+        '<button class="btn btn-ghost btn-sm" id="fontToggle" title="切换投影字号">' + icon('book') + '<span id="fontLabel">正常</span></button>' +
+        '<button class="btn btn-ghost btn-sm" id="btnAskFinish">结束并看小结</button>' +
+      '</div>' +
+    '</div>' +
+
+    '<section class="card ask-student-card">' +
+      '<div class="ask-student-line">' +
+        '<span class="ask-student-index">第 ' + (assignment.idx + 1) + ' / ' + total + ' 位学生</span>' +
+        '<strong class="ask-student-name">' + esc(row.name) + '</strong>' +
+        '<span class="pill">' + row.questions.length + ' 道题</span>' +
+        '<span class="pill pill-success">答对 ' + rightCount + '</span>' +
+        '<span class="pill">已记录 ' + doneCount + ' / ' + row.questions.length + '</span>' +
+        '<span class="qedit-grow"></span>' +
+        '<button class="btn btn-ghost btn-sm" id="btnAskPrevStudent"' + (assignment.idx === 0 ? ' disabled' : '') + '>' + icon('arrow-l') + '上一位学生</button>' +
+        '<button class="btn btn-ghost btn-sm" id="btnAskNextStudent"' + (assignment.idx >= total - 1 ? ' disabled' : '') + '>下一位学生' + icon('arrow-r') + '</button>' +
+      '</div>' +
+    '</section>' +
+
+    questionCard +
+
+    '<div class="quiz-nav">' +
+      '<button class="btn btn-ghost" id="btnAskPrevQ"' + (assignment.qIdx === 0 ? ' disabled' : '') + '>' + icon('arrow-l') + '上一题</button>' +
+      navRight +
+    '</div>' +
+
+    '<div class="ask-student-map" aria-label="学生导航">' + studentMap + '</div>' +
+  '</div>';
+}
+
+/** 提问页的题目内容：选项只做展示，不点选 */
+function renderAskAnswer(q, revealed) {
+  if (q.type === 'choice' || q.type === 'judge') {
+    const isChoice = q.type === 'choice';
+    const opts = isChoice ? (q.options || []) : ['正确', '错误'];
+    const keys = isChoice ? LETTERS : ['√', '×'];
+    const answerIdx = isChoice
+      ? LETTERS.indexOf(q.answer)
+      : (normJudge(q.answer) === '正确' ? 0 : 1);
+    let html = '<div class="options">' + opts.map((opt, i) => {
+      let cls = 'option';
+      if (revealed && i === answerIdx) cls += ' is-correct';
+      return '<div class="' + cls + '"><span class="option-key">' + (keys[i] || '') + '</span>' +
+        '<span class="option-text">' + esc(opt) + '</span></div>';
+    }).join('') + '</div>';
+    if (revealed) html += askAnswerBlock(q);
+    return html;
+  }
+
+  let html = '<div class="answer-area">' +
+    '<p class="hint">让学生口头回答，再点右上角「显示答案」核对。</p></div>';
+  if (revealed) html += askAnswerBlock(q);
+  return html;
+}
+
+/** 提问页的答案块（给老师看的正确答案 + 解析） */
+function askAnswerBlock(q) {
+  const correctText = q.type === 'choice'
+    ? (q.answer ? q.answer + '. ' + (q.options[LETTERS.indexOf(q.answer)] || '') : '—')
+    : (q.answer || '（这道题没有填答案）');
+  return '<div class="feedback info">' +
+    '<div class="feedback-title">' + icon('check') + '正确答案</div>' +
+    '<div class="feedback-body">' + esc(correctText) + '</div>' +
+    (q.analysis ? '<div class="feedback-body" style="margin-top:8px"><b>解析：</b>' + esc(q.analysis) + '</div>' : '') +
+  '</div>';
+}
+
+/** 提问小结：正确率 + 逐人明细，可打印 */
+function viewAskSummary() {
+  const rows = assignment.students || [];
+  let totalQ = 0, right = 0, wrong = 0, skip = 0, unmarked = 0;
+  rows.forEach(r => {
+    r.questions.forEach((q, i) => {
+      totalQ++;
+      const m = r.marks[i];
+      if (m === 'right') right++;
+      else if (m === 'wrong') wrong++;
+      else if (m === 'skip') skip++;
+      else unmarked++;
+    });
+  });
+  const rate = totalQ ? Math.round(right / totalQ * 100) : 0;
+  const markHtml = m => m === 'right' ? '<span class="mark-ok">✓ 答对</span>'
+    : m === 'wrong' ? '<span class="mark-bad">✗ 答错</span>'
+    : m === 'skip' ? '<span class="mark-skip">— 跳过</span>'
+    : '<span class="mark-skip">未记录</span>';
+
+  const tableRows = rows.map(r => {
+    const rRight = r.marks.filter(m => m === 'right').length;
+    const items = r.questions.map((q, i) =>
+      '<li>' +
+        '<span class="ask-sum-stem">' + esc(q.stem) + '</span>' +
+        '<span class="ask-sum-meta">' + QUESTION_TYPES[q.type] + ' · 《' + esc(q.lessonTitle) + '》</span>' +
+        markHtml(r.marks[i]) +
+      '</li>').join('');
+    return '<tr>' +
+      '<td><strong>' + esc(r.name) + '</strong></td>' +
+      '<td><ul class="ask-sum-list">' + items + '</ul></td>' +
+      '<td class="ask-sum-score">' + rRight + ' / ' + r.questions.length + '</td>' +
+    '</tr>';
+  }).join('');
+
+  const comment = unmarked ? '还有 ' + unmarked + ' 道题没有记录，可以点「继续记录」补上再结束。'
+    : rate >= 80 ? '整体掌握得不错，重点讲评答错的题目即可。'
+    : rate >= 60 ? '基础基本过关，建议带着学生回到课文里找依据。'
+    : '多数题目还需要再讲一遍，可以从错题集中的段落入手。';
+
+  const meta = [
+    assignment.className,
+    rows.length + ' 位学生',
+    (assignment.lessonTitles || []).join('、'),
+    shortDate(assignment.finishedAt || assignment.at)
+  ].filter(Boolean).join(' · ');
+
+  return '<div class="view">' +
+    '<div class="quiz-topbar">' +
+      '<div class="quiz-title">' +
+        '<a class="btn btn-ghost btn-sm" href="#/ask">' + icon('arrow-l') + '返回设置</a>' +
+        '<h2>提问小结</h2>' +
+      '</div>' +
+      '<div class="quiz-actions"><button class="btn btn-ghost btn-sm" onclick="window.print()">打印小结</button></div>' +
+    '</div>' +
+
+    '<section class="result-hero">' +
+      '<div class="score-ring" style="--pct:' + rate + '"><span>' + rate + '<small>%</small></span></div>' +
+      '<h2>' + comment + '</h2>' +
+      '<p>' + esc(meta) + '</p>' +
+      '<div class="result-stats">' +
+        '<div class="result-stat"><b>' + rows.length + '</b><span>被提问学生</span></div>' +
+        '<div class="result-stat"><b>' + totalQ + '</b><span>题目</span></div>' +
+        '<div class="result-stat"><b style="color:#2f9e44">' + right + '</b><span>答对</span></div>' +
+        '<div class="result-stat"><b style="color:#e03131">' + (wrong + skip) + '</b><span>答错 / 跳过</span></div>' +
+      '</div>' +
+      '<div class="result-actions">' +
+        '<button class="btn btn-primary" id="btnAskAgain">' + icon('dice') + '再抽一轮（重新随机分题）</button>' +
+        (unmarked ? '<button class="btn btn-ghost" id="btnAskResume">继续记录</button>' : '') +
+        '<a class="btn btn-ghost" href="#/ask">重新设置</a>' +
+        '<a class="btn btn-ghost" href="#/">返回课文列表</a>' +
+      '</div>' +
+    '</section>' +
+
+    '<section class="panel card" style="margin-top:22px">' +
+      '<h3>' + icon('file') + '逐人明细</h3>' +
+      '<p class="panel-desc">' + (unmarked ? '还有 ' + unmarked + ' 道题没有记录，显示为「未记录」。' : '全班记录如下，可以打印出来留存。') + '</p>' +
+      '<table class="ask-table">' +
+        '<thead><tr><th>学生</th><th>题目与记录</th><th>答对</th></tr></thead>' +
+        '<tbody>' + tableRows + '</tbody>' +
+      '</table>' +
+    '</section>' +
   '</div>';
 }
 
@@ -1757,6 +2630,32 @@ function bindHome() {
     if (parseRoute().name === 'manage') { render(true); bindManage(); }
     else location.hash = '#/manage';
   }));
+
+  // 课文卡片上的「提问」：带着这篇课文去课堂提问页
+  $$('[data-ask-lesson]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.getAttribute('data-ask-lesson');
+    askDraft.lessonIds = [id];
+    saveAskDraft();
+    location.hash = '#/ask';
+  }));
+}
+
+/** 投影字号切换（答题页与课堂提问页共用） */
+function bindFontToggle() {
+  const fontBtn = $('#fontToggle');
+  if (!fontBtn) return;
+  fontBtn.addEventListener('click', () => {
+    const order = ['', 'zoom-lg', 'zoom-xl'];
+    const labels = ['正常', '大字', '投影'];
+    let cur = order.findIndex(c => c && document.body.classList.contains(c));
+    if (cur < 0) cur = 0;
+    order.forEach(c => { if (c) document.body.classList.remove(c); });
+    const nx = (cur + 1) % order.length;
+    if (order[nx]) document.body.classList.add(order[nx]);
+    const lab = $('#fontLabel');
+    if (lab) lab.textContent = labels[nx];
+    try { localStorage.setItem('yw_quiz_zoom', String(nx)); } catch (e) { /* 忽略 */ }
+  });
 }
 
 /* ============================== 交互：答题页 ============================== */
@@ -1870,19 +2769,7 @@ function bindQuiz() {
   });
 
   // 投影字号
-  const fontBtn = $('#fontToggle');
-  if (fontBtn) fontBtn.addEventListener('click', () => {
-    const order = ['', 'zoom-lg', 'zoom-xl'];
-    const labels = ['正常', '大字', '投影'];
-    let cur = order.findIndex(c => c && document.body.classList.contains(c));
-    if (cur < 0) cur = 0;
-    order.forEach(c => { if (c) document.body.classList.remove(c); });
-    const nx = (cur + 1) % order.length;
-    if (order[nx]) document.body.classList.add(order[nx]);
-    const lab = $('#fontLabel');
-    if (lab) lab.textContent = labels[nx];
-    try { localStorage.setItem('yw_quiz_zoom', String(nx)); } catch (e) { /* 忽略 */ }
-  });
+  bindFontToggle();
 
   // 键盘快捷键
   document.onkeydown = e => {
@@ -1925,6 +2812,409 @@ function bindResult() {
     toast('已筛出 ' + wrongIds.length + ' 道错题，开始重练', 'ok');
     location.hash = '#/quiz/' + encodeURIComponent(lessonId);
   });
+}
+
+/* ============================== 交互：学生名单页 ============================== */
+function bindRoster() {
+  $$('[data-class]').forEach(btn => btn.addEventListener('click', () => {
+    roster.activeClassId = btn.getAttribute('data-class');
+    rosterFilter = '';
+    saveRoster();
+    rerenderRoster();
+  }));
+
+  const newClass = $('#btnNewClass');
+  if (newClass) newClass.addEventListener('click', () => {
+    const name = prompt('新班级名称（例如：四年级一班）', '');
+    if (name === null) return;
+    const nm = name.trim();
+    if (!nm) { toast('班级名称不能为空', 'bad'); return; }
+    if (roster.classes.some(c => c.name === nm)) { toast('已经有同名的班级了', 'bad'); return; }
+    const cls = { id: uid('cls'), name: nm, students: [] };
+    roster.classes.push(cls);
+    roster.activeClassId = cls.id;
+    rosterFilter = '';
+    saveRoster();
+    toast('已新建班级「' + nm + '」', 'ok');
+    rerenderRoster();
+  });
+
+  const rename = $('#btnRenameClass');
+  if (rename) rename.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls) return;
+    const name = prompt('修改班级名称', cls.name);
+    if (name === null) return;
+    const nm = name.trim();
+    if (!nm) { toast('班级名称不能为空', 'bad'); return; }
+    if (roster.classes.some(c => c.id !== cls.id && c.name === nm)) { toast('已经有同名的班级了', 'bad'); return; }
+    cls.name = nm;
+    saveRoster();
+    toast('班级名称已修改', 'ok');
+    rerenderRoster();
+  });
+
+  const delClass = $('#btnDelClass');
+  if (delClass) delClass.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls) return;
+    if (roster.classes.length <= 1) { toast('至少要保留一个班级', 'bad'); return; }
+    if (!confirm('确定删除班级「' + cls.name + '」以及里面的 ' + cls.students.length + ' 名学生吗？此操作不可撤销。')) return;
+    roster.classes = roster.classes.filter(c => c.id !== cls.id);
+    roster.activeClassId = roster.classes[0].id;
+    askDraft.studentIds = [];
+    rosterFilter = '';
+    saveRoster();
+    saveAskDraft();
+    toast('已删除班级', 'ok');
+    rerenderRoster();
+  });
+
+  const clearClass = $('#btnClearClass');
+  if (clearClass) clearClass.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls || !cls.students.length) { toast('本班还没有学生', 'bad'); return; }
+    if (!confirm('确定清空「' + cls.name + '」的 ' + cls.students.length + ' 名学生吗？此操作不可撤销。')) return;
+    cls.students = [];
+    askDraft.studentIds = [];
+    saveRoster();
+    saveAskDraft();
+    toast('已清空本班名单', 'ok');
+    rerenderRoster();
+  });
+
+  const input = $('#newStudentName');
+  const addByName = () => {
+    const cls = activeClass();
+    if (!cls) return;
+    const names = splitNames(input ? input.value : '');
+    if (!names.length) { toast('请输入学生姓名', 'bad'); return; }
+    const res = addStudentsToClass(cls, names);
+    saveRoster();
+    if (!res.added) { toast('这些名字都已经在名单里了', 'bad'); return; }
+    toast('已添加 ' + res.added + ' 人' + (res.dup ? '，跳过 ' + res.dup + ' 个重名' : ''), 'ok');
+    rerenderRoster();
+  };
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addByName(); } });
+  const addBtn = $('#btnAddStudent');
+  if (addBtn) addBtn.addEventListener('click', addByName);
+
+  // 搜索：只过滤已渲染的行，避免重绘导致输入框失焦
+  const search = $('#studentSearch');
+  if (search) search.addEventListener('input', () => {
+    rosterFilter = search.value;
+    const kw = rosterFilter.trim().toLowerCase();
+    $$('.student-row').forEach(row => {
+      const el = $('.student-name', row);
+      const hit = !kw || (el ? el.textContent.toLowerCase().indexOf(kw) >= 0 : false);
+      row.classList.toggle('hidden', !hit);
+    });
+  });
+
+  const impToggle = $('#btnImportToggle');
+  if (impToggle) impToggle.addEventListener('click', () => {
+    const panel = $('#importPanel');
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+    const ta = $('#importNames');
+    if (ta && !panel.classList.contains('hidden')) ta.focus();
+  });
+  const expRoster = $('#btnExportRoster');
+  if (expRoster) expRoster.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls || !cls.students.length) { toast('本班还没有学生', 'bad'); return; }
+    const content = cls.students.map(s => s.name).join('\n') + '\n';
+    downloadTextFile(cls.name + '-学生名单.csv', content, 'text/csv');
+    toast('已导出本班名单，下次换电脑直接粘贴导入即可', 'ok');
+  });
+  const impCancel = $('#btnImportCancel');
+  if (impCancel) impCancel.addEventListener('click', () => {
+    const panel = $('#importPanel');
+    if (panel) panel.classList.add('hidden');
+  });
+  const impBtn = $('#btnImportNames');
+  if (impBtn) impBtn.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls) return;
+    const ta = $('#importNames');
+    const names = splitNames(ta ? ta.value : '');
+    if (!names.length) { toast('请先粘贴名单', 'bad'); return; }
+    const res = addStudentsToClass(cls, names);
+    saveRoster();
+    if (!res.added) { toast('名单里的人都已经在班级里了，没有新增', 'bad'); return; }
+    toast('已导入 ' + res.added + ' 人' + (res.dup ? '，跳过 ' + res.dup + ' 个重名' : ''), 'ok');
+    rerenderRoster();
+  });
+
+  $$('[data-student-edit]').forEach(btn => btn.addEventListener('click', () => {
+    const cls = activeClass();
+    const s = cls && cls.students.find(x => x.id === btn.getAttribute('data-student-edit'));
+    if (!s) return;
+    const name = prompt('修改姓名', s.name);
+    if (name === null) return;
+    const nm = name.trim();
+    if (!nm) { toast('姓名不能为空', 'bad'); return; }
+    if (cls.students.some(x => x.id !== s.id && x.name === nm)) { toast('班里已经有叫「' + nm + '」的学生了', 'bad'); return; }
+    s.name = nm;
+    saveRoster();
+    rerenderRoster();
+  }));
+
+  $$('[data-student-del]').forEach(btn => btn.addEventListener('click', () => {
+    const cls = activeClass();
+    const id = btn.getAttribute('data-student-del');
+    const s = cls && cls.students.find(x => x.id === id);
+    if (!s) return;
+    if (!confirm('把「' + s.name + '」从名单里删除吗？')) return;
+    cls.students = cls.students.filter(x => x.id !== id);
+    askDraft.studentIds = askDraft.studentIds.filter(x => x !== id);
+    saveRoster();
+    saveAskDraft();
+    toast('已删除', 'ok');
+    rerenderRoster();
+  }));
+}
+
+/* ============================== 交互：课堂提问（设置页） ============================== */
+/** 把已选项同步到界面：学生 chips、题型、课文、底部提示 */
+function syncAskPickers() {
+  $$('[data-pick-student]').forEach(chip => {
+    const on = askDraft.studentIds.indexOf(chip.getAttribute('data-pick-student')) >= 0;
+    chip.classList.toggle('is-on', on);
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  $$('[data-type-toggle]').forEach(btn => {
+    btn.classList.toggle('is-on', askDraft.types.indexOf(btn.getAttribute('data-type-toggle')) >= 0);
+  });
+  $$('[data-lesson-check]').forEach(lb => {
+    const on = askDraft.lessonIds.indexOf(lb.getAttribute('data-lesson-check')) >= 0;
+    const cb = $('input', lb);
+    if (cb) cb.checked = on;
+    lb.classList.toggle('is-on', on);
+  });
+  updateAskSummary();
+}
+
+/** 更新「已选学生」与底部题目数量提示 */
+function updateAskSummary() {
+  const cls = activeClass();
+  const picked = cls ? cls.students.filter(s => askDraft.studentIds.indexOf(s.id) >= 0) : [];
+  const per = clampInt(askDraft.per, 1, 20, 1);
+
+  const cnt = $('#askSelectedCount');
+  if (cnt) cnt.textContent = String(picked.length);
+  const names = $('#askSelectedNames');
+  if (names) names.textContent = picked.length ? picked.map(s => s.name).join('、') : '还没有选学生';
+  const pv = $('#askPreview');
+  if (pv) pv.innerHTML = askPreviewHtml(picked, per);
+}
+
+/** 课文全选 / 全不选 */
+function setAllLessons(on) {
+  askDraft.lessonIds = on ? bank.lessons.map(l => l.id) : [];
+  saveAskDraft();
+  $$('[data-lesson-check]').forEach(lb => {
+    const hit = askDraft.lessonIds.indexOf(lb.getAttribute('data-lesson-check')) >= 0;
+    const cb = $('input', lb);
+    if (cb) cb.checked = hit;
+    lb.classList.toggle('is-on', hit);
+  });
+  updateAskSummary();
+}
+
+function bindAsk() {
+  const clsSel = $('#askClass');
+  if (clsSel) clsSel.addEventListener('change', () => {
+    askDraft.classId = clsSel.value;
+    askDraft.studentIds = [];
+    saveAskDraft();
+    rerenderAskPage();
+  });
+
+  $$('[data-pickmode]').forEach(btn => btn.addEventListener('click', () => {
+    askDraft.pickMode = btn.getAttribute('data-pickmode');
+    saveAskDraft();
+    rerenderAskPage();
+  }));
+
+  const draw = $('#btnDraw');
+  if (draw) draw.addEventListener('click', () => {
+    const cls = activeClass();
+    if (!cls) return;
+    const countEl = $('#drawCount');
+    const preferEl = $('#drawPreferNew');
+    const n = clampInt(countEl ? countEl.value : 1, 1, cls.students.length, 1);
+    askDraft.pickMode = 'random';
+    askDraft.randomCount = n;
+    askDraft.preferNew = preferEl ? preferEl.checked : true;
+    const picked = randomPickStudents(cls.students, n, askDraft.preferNew);
+    askDraft.studentIds = picked.map(s => s.id);
+    saveAskDraft();
+    syncAskPickers();
+    toast('已随机抽到：' + picked.map(s => s.name).join('、'), 'ok');
+  });
+
+  $$('[data-pick-student]').forEach(chip => chip.addEventListener('click', () => {
+    const id = chip.getAttribute('data-pick-student');
+    const i = askDraft.studentIds.indexOf(id);
+    if (i >= 0) askDraft.studentIds.splice(i, 1);
+    else askDraft.studentIds.push(id);
+    saveAskDraft();
+    syncAskPickers();
+  }));
+
+  const pickAll = $('#btnPickAll');
+  if (pickAll) pickAll.addEventListener('click', () => {
+    const cls = activeClass();
+    askDraft.studentIds = cls ? cls.students.map(s => s.id) : [];
+    saveAskDraft();
+    syncAskPickers();
+  });
+  const pickNone = $('#btnPickNone');
+  if (pickNone) pickNone.addEventListener('click', () => {
+    askDraft.studentIds = [];
+    saveAskDraft();
+    syncAskPickers();
+  });
+
+  $$('[data-lesson-check]').forEach(lb => {
+    const cb = $('input', lb);
+    if (!cb) return;
+    cb.addEventListener('change', () => {
+      const id = lb.getAttribute('data-lesson-check');
+      if (cb.checked) { if (askDraft.lessonIds.indexOf(id) < 0) askDraft.lessonIds.push(id); }
+      else askDraft.lessonIds = askDraft.lessonIds.filter(x => x !== id);
+      lb.classList.toggle('is-on', cb.checked);
+      saveAskDraft();
+      updateAskSummary();
+    });
+  });
+  const lessonAll = $('#btnLessonAll');
+  if (lessonAll) lessonAll.addEventListener('click', () => setAllLessons(true));
+  const lessonNone = $('#btnLessonNone');
+  if (lessonNone) lessonNone.addEventListener('click', () => setAllLessons(false));
+
+  $$('[data-type-toggle]').forEach(btn => btn.addEventListener('click', () => {
+    const t = btn.getAttribute('data-type-toggle');
+    const i = askDraft.types.indexOf(t);
+    if (i >= 0) askDraft.types.splice(i, 1);
+    else askDraft.types.push(t);
+    btn.classList.toggle('is-on', askDraft.types.indexOf(t) >= 0);
+    saveAskDraft();
+    updateAskSummary();
+  }));
+
+  const perEl = $('#askPer');
+  if (perEl) perEl.addEventListener('change', () => {
+    askDraft.per = clampInt(perEl.value, 1, 20, 1);
+    perEl.value = askDraft.per;
+    saveAskDraft();
+    updateAskSummary();
+  });
+  const nrEl = $('#askNoRepeat');
+  if (nrEl) nrEl.addEventListener('change', () => {
+    askDraft.noRepeat = nrEl.checked;
+    saveAskDraft();
+    updateAskSummary();
+  });
+  const preferEl = $('#drawPreferNew');
+  if (preferEl) preferEl.addEventListener('change', () => {
+    askDraft.preferNew = preferEl.checked;
+    saveAskDraft();
+  });
+
+  const start = $('#btnStartAsk');
+  if (start) start.addEventListener('click', startAsk);
+
+  const wrapUp = $('#btnAskWrapUp');
+  if (wrapUp) wrapUp.addEventListener('click', () => {
+    if (!assignment) return;
+    if (!confirm('结束上一次提问吗？没记录的题会显示为「未记录」。')) return;
+    assignment.finished = true;
+    assignment.finishedAt = Date.now();
+    saveAssignment();
+    location.hash = '#/ask/run';
+  });
+
+  syncAskPickers();
+}
+
+/* ============================== 交互：课堂提问（进行页 / 小结） ============================== */
+function bindAskRun() {
+  bindFontToggle();
+  if (!assignment) return;
+
+  if (assignment.finished) {
+    const again = $('#btnAskAgain');
+    if (again) again.addEventListener('click', askAgain);
+    const resume = $('#btnAskResume');
+    if (resume) resume.addEventListener('click', () => {
+      assignment.finished = false;
+      assignment.finishedAt = 0;
+      saveAssignment();
+      rerenderAskRun();
+    });
+    return;
+  }
+
+  const row = assignment.students[assignment.idx];
+  if (!row) return;
+
+  const gotoStudent = i => {
+    if (i < 0 || i >= assignment.students.length) return;
+    if (!assignment.students[i].questions.length) return;
+    assignment.idx = i;
+    assignment.qIdx = 0;
+    askRevealed = false;
+    saveAssignment();
+    rerenderAskRun();
+  };
+  const gotoQuestion = i => {
+    if (i < 0 || i >= row.questions.length) return;
+    assignment.qIdx = i;
+    askRevealed = false;
+    saveAssignment();
+    rerenderAskRun();
+  };
+
+  const reveal = $('#btnAskReveal');
+  if (reveal) reveal.addEventListener('click', () => {
+    askRevealed = !askRevealed;
+    rerenderAskRun();
+  });
+  const swap = $('#btnAskSwap');
+  if (swap) swap.addEventListener('click', swapCurrentQuestion);
+
+  $$('[data-mark]').forEach(btn => btn.addEventListener('click', () => {
+    const m = btn.getAttribute('data-mark');
+    if (row.marks[assignment.qIdx] === m) row.marks[assignment.qIdx] = '';   // 再点一次取消
+    else row.marks[assignment.qIdx] = m;
+    saveAssignment();
+    if (row.marks[assignment.qIdx] && assignment.qIdx < row.questions.length - 1) {
+      assignment.qIdx++;
+      askRevealed = false;
+    }
+    rerenderAskRun();
+  }));
+
+  const prevQ = $('#btnAskPrevQ');
+  if (prevQ) prevQ.addEventListener('click', () => gotoQuestion(assignment.qIdx - 1));
+  const nextQ = $('#btnAskNextQ');
+  if (nextQ) nextQ.addEventListener('click', () => gotoQuestion(assignment.qIdx + 1));
+  const prevS = $('#btnAskPrevStudent');
+  if (prevS) prevS.addEventListener('click', () => gotoStudent(assignment.idx - 1));
+  const nextS = $('#btnAskNextStudent');
+  if (nextS) nextS.addEventListener('click', () => gotoStudent(assignment.idx + 1));
+  const nextS2 = $('#btnAskNextStudent2');
+  if (nextS2) nextS2.addEventListener('click', () => gotoStudent(assignment.idx + 1));
+  const fin2 = $('#btnAskFinish2');
+  if (fin2) fin2.addEventListener('click', finishAsk);
+  const fin = $('#btnAskFinish');
+  if (fin) fin.addEventListener('click', finishAsk);
+
+  $$('[data-ask-goto]').forEach(btn => btn.addEventListener('click', () => {
+    gotoStudent(parseInt(btn.getAttribute('data-ask-goto'), 10) || 0);
+  }));
 }
 
 /* ============================== 交互：题库管理页 ============================== */
@@ -2105,6 +3395,10 @@ function showStorageWarning() {
 
 function boot() {
   bank = loadBank();
+  roster = loadRoster();
+  askDraft = loadAskDraft();
+  assignment = loadAssignment();
+  initAskDraft();
 
   // 存储不可用 → 顶部醒目提示
   if (!storageAvailable()) showStorageWarning();
@@ -2126,7 +3420,8 @@ function boot() {
     if (parseRoute().name === 'manage') { render(true); bindManage(); }
   }));
 
-  window.addEventListener('hashchange', () => {
+  // 渲染 + 绑定当前路由（hashchange 与首屏共用）
+  const dispatch = () => {
     if (parseRoute().name !== 'quiz') document.onkeydown = null;
     render();
     const r = parseRoute();
@@ -2134,14 +3429,13 @@ function boot() {
     else if (r.name === 'quiz') bindQuiz();
     else if (r.name === 'manage') bindManage();
     else if (r.name === 'result') bindResult();
-  });
+    else if (r.name === 'roster') bindRoster();
+    else if (r.name === 'ask') bindAsk();
+    else if (r.name === 'askRun') bindAskRun();
+  };
 
-  render();
-  const r = parseRoute();
-  if (r.name === 'home') bindHome();
-  else if (r.name === 'quiz') bindQuiz();
-  else if (r.name === 'manage') bindManage();
-  else if (r.name === 'result') bindResult();
+  window.addEventListener('hashchange', dispatch);
+  dispatch();
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

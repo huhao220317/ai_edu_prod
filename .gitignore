@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+._*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 测试时生成的临时文件
+tests/*.log
