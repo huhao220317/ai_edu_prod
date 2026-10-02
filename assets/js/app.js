@@ -1242,6 +1242,64 @@ function swapCurrentQuestion() {
   rerenderAskRun();
 }
 
+/**
+ * 给后来加入的学生抽题：优先用「别的同学还没被问到的题」，题库不够时再允许重复。
+ * 同一位学生自己的题目不会重复。
+ */
+function assignQuestionsForOne(pool, per, usedQids) {
+  const used = usedQids || [];
+  const list = shuffleArray(pool.filter(q => used.indexOf(q.qid) < 0)).slice(0, per);
+  if (list.length < per) {
+    const rest = shuffleArray(pool).filter(q => list.every(x => x.qid !== q.qid));
+    list.push.apply(list, rest.slice(0, per - list.length));
+  }
+  return list.map(q => deepClone(q));
+}
+
+/**
+ * 临时加一位学生（课堂上来了旁听生、转学生，或者老师临时想提问某位同学）。
+ * · 名字在班级名单里 → 沿用这位同学，提问次数照常累加
+ * · 名字不在名单里 → 只加入本次提问，不写入名单（下次提问不会再出现）
+ */
+function addTempStudent(name) {
+  if (!assignment || assignment.finished) return;
+  const nm = String(name == null ? '' : name).trim();
+  if (!nm) { toast('请输入学生姓名', 'bad'); return; }
+  if (nm.length > 12) { toast('姓名太长了，请确认一下', 'bad'); return; }
+
+  const cls = roster.classes.find(c => c.id === assignment.classId) || null;
+  const inRoster = cls ? cls.students.find(s => s.name === nm) : null;
+  const already = assignment.students.some(r => (inRoster ? r.studentId === inRoster.id : r.name === nm));
+  if (already) { toast('「' + nm + '」已经在这次提问里了', 'bad'); return; }
+
+  const usedQids = [];
+  assignment.students.forEach(r => r.questions.forEach(q => {
+    if (usedQids.indexOf(q.qid) < 0) usedQids.push(q.qid);
+  }));
+  const questions = assignQuestionsForOne(assignment.pool || [], assignment.per, usedQids);
+  if (!questions.length) { toast('题库里没有可以分配的题目了', 'bad'); return; }
+
+  if (inRoster) {
+    inRoster.askedCount = (inRoster.askedCount || 0) + 1;
+    inRoster.lastAskedAt = Date.now();
+    saveRoster();
+  }
+
+  assignment.students.push({
+    studentId: inRoster ? inRoster.id : uid('temp'),
+    name: nm,
+    temp: !inRoster,
+    questions: questions,
+    marks: questions.map(() => '')
+  });
+  assignment.idx = assignment.students.length - 1;   // 直接跳到新加的这位同学
+  assignment.qIdx = 0;
+  askRevealed = false;
+  saveAssignment();
+  toast(inRoster ? '已把「' + nm + '」加进来（名单里的同学）' : '已临时加入「' + nm + '」（不会写入名单）', 'ok');
+  rerenderAskRun();
+}
+
 /* ============================== 路由 ============================== */
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, '');
@@ -1941,10 +1999,12 @@ function viewAskRun() {
       '<div class="ask-student-line">' +
         '<span class="ask-student-index">第 ' + (assignment.idx + 1) + ' / ' + total + ' 位学生</span>' +
         '<strong class="ask-student-name">' + esc(row.name) + '</strong>' +
+        (row.temp ? '<span class="pill pill-accent">临时加入</span>' : '') +
         '<span class="pill">' + row.questions.length + ' 道题</span>' +
         '<span class="pill pill-success">答对 ' + rightCount + '</span>' +
         '<span class="pill">已记录 ' + doneCount + ' / ' + row.questions.length + '</span>' +
         '<span class="qedit-grow"></span>' +
+        '<button class="btn btn-ghost btn-sm" id="btnAskAddStudent" title="名单外的同学，只加入这次提问">＋ 临时加人</button>' +
         '<button class="btn btn-ghost btn-sm" id="btnAskPrevStudent"' + (assignment.idx === 0 ? ' disabled' : '') + '>' + icon('arrow-l') + '上一位学生</button>' +
         '<button class="btn btn-ghost btn-sm" id="btnAskNextStudent"' + (assignment.idx >= total - 1 ? ' disabled' : '') + '>下一位学生' + icon('arrow-r') + '</button>' +
       '</div>' +
@@ -2027,7 +2087,7 @@ function viewAskSummary() {
         markHtml(r.marks[i]) +
       '</li>').join('');
     return '<tr>' +
-      '<td><strong>' + esc(r.name) + '</strong></td>' +
+      '<td><strong>' + esc(r.name) + '</strong>' + (r.temp ? '<br><span class="pill pill-accent">临时</span>' : '') + '</td>' +
       '<td><ul class="ask-sum-list">' + items + '</ul></td>' +
       '<td class="ask-sum-score">' + rRight + ' / ' + r.questions.length + '</td>' +
     '</tr>';
@@ -3184,6 +3244,13 @@ function bindAskRun() {
   });
   const swap = $('#btnAskSwap');
   if (swap) swap.addEventListener('click', swapCurrentQuestion);
+
+  const addStudent = $('#btnAskAddStudent');
+  if (addStudent) addStudent.addEventListener('click', () => {
+    const name = prompt('临时加一位学生：\n\n· 名字在名单里 → 沿用这位同学\n· 名单以外 → 只加入这次提问，不会写进名单', '');
+    if (name === null) return;
+    addTempStudent(name);
+  });
 
   $$('[data-mark]').forEach(btn => btn.addEventListener('click', () => {
     const m = btn.getAttribute('data-mark');

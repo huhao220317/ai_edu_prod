@@ -186,6 +186,7 @@ test('不开启公平优先时也能抽够人数且不重复', function () {
 /* ------------------------------ 随机分题 ------------------------------ */
 console.log('\n随机分题');
 const assignQuestions = api('assignQuestions');
+const assignQuestionsForOne = api('assignQuestionsForOne');
 const buildAskPool = api('buildAskPool');
 
 function makePool(n) {
@@ -266,6 +267,27 @@ test('buildAskPool 按课文 + 题型筛选，并带上课文名', function () {
   eq(buildAskPool(['l1', 'l2'], ['fill']).length, 1);
   eq(buildAskPool(['l2'], ['fill'])[0].lessonTitle, '走月亮');
   eq(buildAskPool(['none'], ['choice']).length, 0);
+});
+
+test('临时加人抽题：优先用别人还没被问过的题', function () {
+  const pool = makePool(10);
+  const used = ['q0', 'q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7'];
+  const list = assignQuestionsForOne(pool, 2, used);
+  eq(list.length, 2);
+  list.forEach(function (q) { ok(used.indexOf(q.qid) < 0, '不应分到已问过的 ' + q.qid); });
+  eq(new Set(list.map(function (q) { return q.qid; })).size, 2, '同一位学生内部不重复');
+});
+
+test('临时加人：题库不够时允许与别人重复，但本人不重复', function () {
+  const pool = makePool(3);
+  const list = assignQuestionsForOne(pool, 2, ['q0', 'q1', 'q2']);
+  eq(list.length, 2);
+  eq(new Set(list.map(function (q) { return q.qid; })).size, 2);
+});
+
+test('临时加人：题库比题量还少时，有几分几', function () {
+  eq(assignQuestionsForOne(makePool(1), 3, []).length, 1);
+  eq(assignQuestionsForOne([], 2, []).length, 0);
 });
 
 /* ------------------------------ 解析（回归） ------------------------------ */

@@ -127,6 +127,7 @@ stop_browser() {
   sleep 0.5
 }
 
+run_page "routes-check.html" "页面与路由自检（每个页面都能正常打开）"
 run_page "browser-smoke.html" "浏览器端测试（名单 → 随机分题 → 记录 → 小结）"
 
 # ---- PWA / 离线 ----

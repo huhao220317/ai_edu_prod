@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>语文课堂提问系统 · 页面与路由自检</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 20px; }
+  pre { background: #f5f7fb; border: 1px solid #e3e8f0; border-radius: 10px; padding: 16px; font-size: 13.5px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px">页面与路由自检</h1>
+<p style="color:#6b7280;font-size:14px">把每个页面都打开一次，确认都能正常渲染、没有报错、该有的元素都在。
+由 <code>bash tests/run.sh</code> 自动驱动。</p>
+<pre id="out">running…</pre>
+
+<script>
+const out = [];
+const render = () => { document.getElementById('out').textContent = out.join('\n'); };
+const ok = (cond, msg) => { out.push((cond ? 'PASS  ' : 'FAIL  ') + msg); render(); };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+// 备份并预置数据
+const backup = {};
+for (let i = 0; i < localStorage.length; i++) {
+  const k = localStorage.key(i);
+  backup[k] = localStorage.getItem(k);
+}
+const restore = () => {
+  localStorage.clear();
+  Object.keys(backup).forEach(k => localStorage.setItem(k, backup[k]));
+};
+
+localStorage.clear();
+localStorage.setItem('yw_quiz_roster_v1', JSON.stringify({
+  version: 1, activeClassId: 'c1',
+  classes: [{ id: 'c1', name: '四(1)班', students: ['张三', '李四', '王五'].map((n, i) => ({ id: 's' + i, name: n })) }]
+}));
+
+const frame = document.createElement('iframe');
+frame.style.cssText = 'position:absolute;left:-9999px;top:0;width:1280px;height:900px;border:0';
+frame.src = '../index.html#/';
+let W = null, D = null, first = true;
+
+async function check(route, label, keywords, minLength) {
+  if (first) {
+    first = false;               // 首屏已经加载好了，直接检查
+  } else {
+    W.location.hash = '#' + route;
+  }
+  await wait(260);
+  const main = D.querySelector('#main');
+  const html = main ? main.innerHTML : '';
+  const hits = keywords.filter(k => html.indexOf(k) >= 0);
+  const good = html.length >= (minLength || 300) && hits.length === keywords.length;
+  ok(good, label + '（' + html.length + ' 字符' + (hits.length === keywords.length ? '' : '，缺：' + keywords.filter(k => hits.indexOf(k) < 0).join('、')) + '）');
+}
+
+frame.onload = async () => {
+  W = frame.contentWindow;
+  D = frame.contentDocument;
+  try {
+    await wait(250);
+
+    ok(!!D.querySelector('.site-header') && !!D.querySelector('.site-footer'), '页面骨架（页头/页脚）存在');
+    ok(D.querySelectorAll('.nav a[data-nav]').length >= 4, '主导航有 4 个入口（课文/课堂提问/学生名单/题库管理）');
+    ok(!!D.querySelector('#btnInstall'), '页脚有「装到手机桌面」按钮');
+
+    await check('/', '首页', ['hero-stats', '课堂提问', '开始答题'], 1500);
+    await check('/quiz/demo-guanchao', '答题页（正常课文）', ['q-stem', 'options'], 800);
+    await check('/quiz/不存在的课文', '答题页（课文不存在时的空状态）', ['没有找到这篇课文'], 150);
+    await check('/manage', '题库管理页', ['上传题库文件', '导出 Excel 题库'], 2000);
+    await check('/roster', '学生名单页', ['张三', '批量粘贴名单'], 1000);
+    await check('/ask', '课堂提问设置页', ['开始提问', '随机抽取'], 1500);
+    await check('/ask/run', '提问进行页（还没有会话）', ['还没有正在进行的提问'], 150);
+    await check('/result/不存在', '结果页（没有记录）', ['没有可用的答题记录'], 150);
+    await check('/这不是一个有效路由', '未知路由回落到首页', ['hero-stats'], 1500);
+
+    // 提问设置页里的学生 chips 应来自名单
+    W.location.hash = '#/ask';
+    await wait(260);
+    ok(D.querySelectorAll('.student-chip').length === 3, '提问设置页按名单列出 3 位学生');
+    ok(D.querySelectorAll('.check-item').length >= 2, '提问设置页列出课文供多选');
+  } catch (e) {
+    out.push('FAIL  脚本异常：' + (e && e.message));
+  }
+  restore();
+  out.push('DONE');
+  render();
+};
+document.body.appendChild(frame);
+</script>
+</body>
+</html>

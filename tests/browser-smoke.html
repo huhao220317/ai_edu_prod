@@ -109,6 +109,30 @@ frame.onload = async () => {
     const a4 = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
     ok(a4.finished === false && a4.students.length === 2 && a4.students[0].marks.every(m => !m), '再抽一轮得到全新的分配');
 
+    // ---- 临时加人（名单外的同学 / 名单里已有的同学）----
+    const rosterCountBefore = JSON.parse(localStorage.getItem('yw_quiz_roster_v1')).classes[0].students.length;
+    W.prompt = () => '周小北';
+    D.querySelector('#btnAskAddStudent').click();
+    await wait(250);
+    const a5 = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
+    ok(a5.students.length === 3, '临时加人后变成 3 位学生');
+    ok(a5.students[2].name === '周小北' && a5.students[2].temp === true, '名单外的同学标记为「临时」');
+    ok(a5.students[2].questions.length === 2, '临时加入的同学也分到 2 道题');
+    const askedBefore = a5.students.slice(0, 2).reduce((arr, r) => arr.concat(r.questions.map(q => q.qid)), []);
+    ok(a5.students[2].questions.every(q => askedBefore.indexOf(q.qid) < 0), '优先分到别人还没被问过的题');
+    ok(D.querySelector('.ask-student-name').textContent === '周小北', '自动跳到新加入的同学');
+    ok(JSON.parse(localStorage.getItem('yw_quiz_roster_v1')).classes[0].students.length === rosterCountBefore, '临时加入的同学没有写进名单');
+
+    W.prompt = () => '王五';
+    D.querySelector('#btnAskAddStudent').click();
+    await wait(250);
+    const a6 = JSON.parse(localStorage.getItem('yw_quiz_ask_v1'));
+    const wang = a6.students.filter(r => r.name === '王五')[0];
+    ok(!!wang && !wang.temp, '名单里已有的同学沿用本人（不算临时）');
+    ok(wang && wang.questions.length === 2, '沿用后同样分到 2 道题');
+    const wangRoster = JSON.parse(localStorage.getItem('yw_quiz_roster_v1')).classes[0].students.filter(s => s.name === '王五')[0];
+    ok(wangRoster && wangRoster.askedCount >= 1, '沿用名单同学时，提问次数照常累加');
+
     // ---- 中途离开后还能找回这次提问 ----
     W.location.hash = '#/ask';
     await wait(250);
