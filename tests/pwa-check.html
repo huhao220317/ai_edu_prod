@@ -64,7 +64,9 @@ if (/[?&]read=1/.test(location.search)) {
       }
 
       note('注册 Service Worker…');
-      const reg = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
+      // 用相对路径注册，这样部署在子目录（如 GitHub Pages 的 /ai_edu_prod/）也能用
+      const swUrl = new URL('../service-worker.js', location.href).pathname;
+      const reg = await navigator.serviceWorker.register(swUrl);
       let state = '';
       for (let i = 0; i < 50; i++) {
         const w = reg.installing || reg.waiting || reg.active;
