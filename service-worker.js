@@ -7,7 +7,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = 'yw-quiz-' + CACHE_VERSION;
 
 // 需要提前缓存的核心文件（用相对路径，部署到子目录也能正常工作）

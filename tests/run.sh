@@ -45,7 +45,23 @@ CHROME_ARGS="--headless=new --disable-gpu --no-sandbox --disable-background-time
 
 python3 -m http.server "$PORT" >/tmp/yw-quiz-test-server.log 2>&1 &
 SRV=$!
-trap 'kill $SRV 2>/dev/null' EXIT
+
+# 老师的 portable-data.js 会被网站自动加载，会盖掉测试自己预置的数据；
+# 测试期间先移开，跑完原样放回（绝不能删、不能改内容）
+PORTABLE_STASH=""
+if [ -f "$PWD/portable-data.js" ]; then
+  PORTABLE_STASH="$(mktemp -d "${TMPDIR:-/tmp}/yw-portable.XXXXXX")/portable-data.js"
+  cp -p "$PWD/portable-data.js" "$PORTABLE_STASH"
+  mv "$PWD/portable-data.js" "$PWD/portable-data.js.testing"
+  echo "（检测到目录里有 portable-data.js，测试期间临时移开，结束后还原）"
+fi
+restore_portable() {
+  if [ -n "$PORTABLE_STASH" ] && [ -f "$PWD/portable-data.js.testing" ]; then
+    mv "$PWD/portable-data.js.testing" "$PWD/portable-data.js"
+  fi
+}
+
+trap 'restore_portable; kill $SRV 2>/dev/null' EXIT
 sleep 1.2
 
 # 打开一个页面，把 dump 出来的 HTML 写到文件里。
