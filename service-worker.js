@@ -7,7 +7,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = 'yw-quiz-' + CACHE_VERSION;
 
 // 需要提前缓存的核心文件（用相对路径，部署到子目录也能正常工作）
@@ -58,8 +58,12 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       try {
         const res = await fetch(req);
-        const copy = res.clone();
-        caches.open(CACHE_NAME).then(c => c.put('./index.html', copy)).catch(() => {});
+        // 按「请求的 URL」缓存：如果把任何导航都写进 './index.html'，
+        // 老师访问过一次《使用教程》之后，离线打开首页就会拿到教程页（已修，勿回退）
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, copy)).catch(() => {});
+        }
         return res;
       } catch (e) {
         const cached = (await caches.match('./index.html')) || (await caches.match('./'));

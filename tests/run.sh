@@ -159,6 +159,16 @@ fi
 
 #   第 3 步：关掉服务器，确认离线还能打开
 printf '\n▶ 离线检查（把服务器关掉之后再打开网站）\n'
+
+# 先在线访问一次「使用教程」页：如果导航响应被错误地写进首页缓存键，下面的离线检查就会失败
+TMP_OTHER="$(mktemp "${TMPDIR:-/tmp}/yw-other.XXXXXX")"
+CHPID="$(fetch_page "http://localhost:$PORT/使用教程.html" "$TMP_OTHER" "$PROFILE")"
+for _ in $(seq 1 40); do
+  grep -q '</html>' "$TMP_OTHER" 2>/dev/null && break
+  sleep 0.5
+done
+stop_browser "$CHPID"
+
 kill "$SRV" 2>/dev/null
 wait "$SRV" 2>/dev/null
 sleep 1
@@ -169,7 +179,7 @@ stop_browser "$CHPID"
 if grep -q "观潮" "$TMP_OFFLINE"; then
   printf 'PASS  服务器已关闭，首页仍然打得开（界面与题库都来自本机缓存）\n'
 else
-  printf 'FAIL  服务器关闭后打不开首页，离线缓存没生效\n'
+  printf 'FAIL  服务器关闭后首页没有正常打开（可能没缓存，也可能打开的是别的页面）\n'
   exit 1
 fi
 
