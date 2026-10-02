@@ -3359,6 +3359,127 @@ function bindManage() {
   });
 }
 
+/* ============================== PWA：装到手机桌面 / 离线可用 ============================== */
+const INSTALL_TIP_KEY = 'yw_quiz_install_tip_v1';
+let installPrompt = null;   // 安卓 Chrome 的安装事件：先存下来，等老师点按钮时再触发
+
+/** 当前是不是「已经装到桌面」的独立窗口模式 */
+function isStandalone() {
+  try {
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+  } catch (e) { /* 忽略 */ }
+  return window.navigator.standalone === true;
+}
+
+function isIOSDevice() {
+  const ua = navigator.userAgent || '';
+  if (/iphone|ipad|ipod/i.test(ua)) return true;
+  // iPadOS 13 以后 Safari 会把自己伪装成 Mac，用触点数区分
+  return /Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+}
+
+function isMobileDevice() {
+  return isIOSDevice() || /android|mobile|harmony/i.test(navigator.userAgent || '');
+}
+
+/**
+ * 注册 Service Worker（离线可用的关键）。
+ * 浏览器只允许在 https 或 localhost 下注册，所以：双击打开（file://）、
+ * 用公网 IP 走 http 访问时都会自动跳过——网站照常能用，只是没有离线缓存。
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (location.protocol !== 'https:' && !isLocal) return;
+
+  navigator.serviceWorker.register('./service-worker.js').then(reg => {
+    reg.addEventListener('updatefound', () => {
+      const sw = reg.installing;
+      if (!sw) return;
+      sw.addEventListener('statechange', () => {
+        if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+          toast('网站已更新，刷新页面即可用上新版本');
+        }
+      });
+    });
+  }).catch(() => { /* 注册失败不影响正常使用 */ });
+}
+
+/** 点「装到桌面」时：能直接弹安装框就弹，否则给出对应机型的步骤 */
+function requestInstall() {
+  if (isStandalone()) { toast('已经装到桌面了，从桌面图标打开就行'); return; }
+
+  if (installPrompt) {
+    installPrompt.prompt();
+    installPrompt.userChoice.then(choice => {
+      if (choice && choice.outcome === 'accepted') installPrompt = null;
+    }).catch(() => {});
+    return;
+  }
+
+  if (isIOSDevice()) {
+    alert('iPhone / iPad 加到桌面：\n\n' +
+      '1）用 Safari 打开本页\n' +
+      '2）点底部中间的「分享」按钮（方框带向上箭头）\n' +
+      '3）在菜单里选「添加到主屏幕」→ 点「添加」\n\n' +
+      '装好后桌面会出现「语文提问」图标，点开就是全屏，不用再输网址。');
+    return;
+  }
+
+  alert('装到桌面的方法：\n\n' +
+    '· 安卓手机（Chrome / Edge）：点右上角「⋮」→「安装应用」或「添加到主屏幕」\n' +
+    '· iPhone / iPad：必须用 Safari 打开 → 分享 → 添加到主屏幕\n' +
+    '· 如果是在微信里打开的：点右上角「···」→「在浏览器中打开」，再按上面的方法装');
+}
+
+function hideInstallTip() {
+  const el = $('#installTip');
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+/** 手机上第一次打开时，顶部提示一句「可以装到桌面」（关掉后不再出现） */
+function showInstallTip() {
+  if (isStandalone() || !isMobileDevice() || $('#installTip')) return;
+  try { if (localStorage.getItem(INSTALL_TIP_KEY) === '1') return; } catch (e) { /* 忽略 */ }
+
+  const el = document.createElement('div');
+  el.id = 'installTip';
+  el.className = 'install-tip';
+  el.setAttribute('role', 'status');
+  el.innerHTML = '<strong>加到手机桌面，像 App 一样用</strong>' +
+    '<span>上课不用每次输网址，断网也能打开。</span>' +
+    '<button class="btn btn-primary btn-sm" id="installTipGo" type="button">怎么装</button>' +
+    '<button class="install-tip-close" id="installTipClose" type="button" aria-label="不再提示" title="不再提示">✕</button>';
+
+  const header = document.querySelector('.site-header');
+  if (header && header.parentNode) header.parentNode.insertBefore(el, header.nextSibling);
+  else document.body.insertBefore(el, document.body.firstChild);
+
+  const go = $('#installTipGo');
+  if (go) go.addEventListener('click', requestInstall);
+  const close = $('#installTipClose');
+  if (close) close.addEventListener('click', () => {
+    try { localStorage.setItem(INSTALL_TIP_KEY, '1'); } catch (e) { /* 忽略 */ }
+    hideInstallTip();
+  });
+}
+
+function initInstall() {
+  const btn = $('#btnInstall');
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    installPrompt = e;
+  });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    hideInstallTip();
+    toast('已添加到桌面，以后从桌面图标直接打开就行', 'ok');
+  });
+  if (!btn) return;
+  if (isStandalone()) { btn.classList.add('hidden'); return; }
+  btn.addEventListener('click', requestInstall);
+}
+
 /* ============================== 启动 ============================== */
 
 /**
@@ -3402,6 +3523,11 @@ function boot() {
 
   // 存储不可用 → 顶部醒目提示
   if (!storageAvailable()) showStorageWarning();
+
+  // PWA：注册离线缓存 + 「装到桌面」引导
+  registerServiceWorker();
+  initInstall();
+  showInstallTip();
 
   // 恢复上次的投影字号
   try {

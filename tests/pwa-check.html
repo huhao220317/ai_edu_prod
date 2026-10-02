@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>语文课堂提问系统 · PWA 检查</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 20px; }
+  pre { background: #f5f7fb; border: 1px solid #e3e8f0; border-radius: 10px; padding: 16px; font-size: 13.5px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px">语文课堂提问系统 · PWA 检查</h1>
+<p style="color:#6b7280;font-size:14px">检查「加到手机桌面 / 离线可用」需要的条件：manifest、图标、Service Worker 与缓存。
+由 <code>bash tests/run.sh</code> 自动驱动，也可以自己打开看（需要 http，双击打开不行）。</p>
+<pre id="out">running…</pre>
+
+<script>
+/* 这个页面有两副面孔：
+   · 正常打开：跑一遍 PWA 检查，结果写进 localStorage，同时也显示在页面上
+   · 加 ?read=1：把上一次的结果打印出来
+   之所以绕这一圈：Service Worker 的安装是真实异步过程，而无头浏览器的
+   --virtual-time-budget 会抢在它完成之前就截取页面，只能用「真实时间 + 二次读取」。 */
+const REPORT_KEY = 'yw_pwa_report_v1';
+const out = [];
+const render = () => { document.getElementById('out').textContent = out.join('\n'); };
+const save = () => { try { localStorage.setItem(REPORT_KEY, out.join('\n')); } catch (e) { /* 忽略 */ } };
+const ok = (cond, msg) => { out.push((cond ? 'PASS  ' : 'FAIL  ') + msg); render(); save(); };
+const note = msg => { out.push('…     ' + msg); render(); save(); };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+if (/[?&]read=1/.test(location.search)) {
+  const saved = localStorage.getItem(REPORT_KEY) || 'FAIL  没有读到检查结果（第一次检查可能没跑完）';
+  out.push(saved);
+  if (saved.indexOf('DONE') < 0) out.push('DONE');
+  render();
+} else {
+  (async () => {
+    try {
+      /* ---- manifest ---- */
+      const res = await fetch('../manifest.webmanifest');
+      ok(res.ok, 'manifest.webmanifest 能正常访问');
+      const man = await res.json();
+      ok(!!man.name && !!man.short_name, 'manifest 有应用名称（' + man.name + '）');
+      ok(!!man.start_url && !!man.scope, 'manifest 有 start_url 与 scope');
+      ok(man.display === 'standalone', 'manifest 用 standalone（打开后全屏，像 App）');
+      ok(man.theme_color === '#3b5bdb', 'manifest 有主题色');
+
+      const icons = man.icons || [];
+      ok(icons.length >= 3, 'manifest 至少 3 个图标，实际 ' + icons.length);
+      ok(icons.some(i => i.purpose === 'maskable'), '有 maskable 图标（安卓圆形/圆角自适应）');
+      for (const ic of icons) {
+        const r = await fetch('../' + ic.src, { method: 'HEAD' });
+        const ct = r.headers.get('content-type') || '';
+        ok(r.ok && /image\/png/.test(ct), '图标可访问：' + ic.src + '（' + ic.sizes + '）');
+      }
+      const apple = await fetch('../assets/icons/apple-touch-icon.png', { method: 'HEAD' });
+      ok(apple.ok, 'apple-touch-icon 可访问（iOS 加到桌面用）');
+
+      /* ---- Service Worker ---- */
+      if (!('serviceWorker' in navigator)) {
+        ok(false, '当前浏览器不支持 Service Worker');
+        out.push('DONE'); render(); save();
+        return;
+      }
+
+      note('注册 Service Worker…');
+      const reg = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
+      let state = '';
+      for (let i = 0; i < 50; i++) {
+        const w = reg.installing || reg.waiting || reg.active;
+        state = w ? w.state : 'no-worker';
+        if (reg.active) break;
+        await wait(200);
+      }
+      ok(!!reg.active, 'Service Worker 已激活（状态：' + state + '）');
+
+      let names = [];
+      for (let i = 0; i < 50; i++) {
+        names = (await caches.keys()).filter(n => n.indexOf('yw-quiz-') === 0);
+        if (names.length) break;
+        await wait(200);
+      }
+      ok(names.length === 1, '建立了版本缓存：' + (names.join(', ') || '（无）'));
+
+      if (names.length) {
+        const cache = await caches.open(names[0]);
+        const urls = (await cache.keys()).map(r => r.url);
+        ok(urls.some(u => /\/index\.html$/.test(u)), '首页已缓存（断网也能打开）');
+        ok(urls.some(u => /\/assets\/js\/app\.js$/.test(u)), 'app.js 已缓存');
+        ok(urls.some(u => /\/assets\/js\/data\.js$/.test(u)), '内置题库 data.js 已缓存');
+        ok(urls.some(u => /xlsx\.full\.min\.js$/.test(u)), 'Excel 组件已缓存（离线也能导出题库）');
+        ok(urls.some(u => /\/assets\/css\/style\.css$/.test(u)), '样式表已缓存');
+        ok(urls.some(u => /icon-192\.png$/.test(u)), '应用图标已缓存');
+        ok(urls.length >= 10, '核心文件都在缓存里（共 ' + urls.length + ' 个）');
+      }
+    } catch (e) {
+      ok(false, '脚本异常：' + (e && e.message));
+    }
+    out.push('DONE');
+    render();
+    save();
+  })();
+}
+</script>
+</body>
+</html>
